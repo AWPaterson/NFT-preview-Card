@@ -1,0 +1,159 @@
+@font-face {
+    font-family: Outfit;
+    src: url("res/Outfit-VariableFont_wght.ttf");
+}
+
+body {
+    font-family: Outfit;
+    background-color: hsl(219,60%, 8%);
+    padding: 0px;
+}
+
+img {
+    display: inline-block;
+    max-height:80%;
+    max-width:80%;
+}
+
+h1 {
+    color: white;
+    font-weight:600;
+}
+
+h2 {
+    display: inline;
+    padding-left: 8px;
+    color: hsl(215, 51%, 70%);
+    font-size: 18px;
+    font-weight: 400;
+}
+
+#price {
+    color: hsl(178, 100%, 50%);
+}
+
+#eth{
+    float:left;
+    position:relative;
+    max-width: 32px;
+    max-height: 32px;
+    padding-top: 2px;
+}
+
+#clock {
+      float:right;
+      position:relative;
+      padding-right: 6px;
+      max-width: 32px;
+      max-height: 32px;
+      padding-top: 2px;
+  }
+
+#avatar {
+    border-style: solid;
+    border-color: white;
+    border-radius: 100%;
+    border-width: thin;
+    max-width: 28px;
+    max-height: 28px;
+    float: left;
+}
+
+#clock {
+    align: right;
+}
+
+#preview {
+    position: relative;
+    display: block;
+    margin-left:auto;
+    margin-right: auto;
+    max-width: 100%;
+    max-height: 100%;
+    border-radius:10px;
+}
+
+#artistLink {
+    color: white;
+}
+
+p {
+    color: hsl(215, 51%, 70%);
+    font-size: 18px;
+    font-weight: 300;
+}
+
+hr {
+    height: 1px;
+    width: 80%;
+    position: relative;
+    margin: 15px auto;
+    border-color: hsl(215, 32%, 27%);
+    color:transparent;
+}
+
+.attribution {
+    background-color: white;
+    height:22px;
+    position: fixed;
+    margin-left:auto;
+    margin-right: auto;
+    bottom:0%;
+    left:43.5%;
+    width: 300px;
+    font-size:20px;
+}
+
+.card {
+    position: fixed;
+    display: block;
+    margin-left:auto;
+    margin-right: auto;
+    padding: 15px 15px 15px 15px;
+    top: 5%;
+    left:5%;
+    right: 5%;
+    bottom: 20%;
+    width:400px;
+    height:700px;
+    max-width: 80%;
+    max-height:85%;
+    background-color: hsl(216,50%,16%);
+    border-radius: 3%;
+}
+
+.shadow2 {
+    position: fixed;
+    display: block;
+    margin-left:auto;
+    margin-right: auto;
+    padding: 15px 15px 15px 15px;
+    top: 3%;
+    left:3%;
+    right: 3%;
+    bottom: 17%;
+    width:475px;
+    height:780px;
+    max-width: 85%;
+    max-height:90%;
+    background-color: hsl(217,54%,11%);
+    border-radius: 3%;
+}
+
+.shadow1 {
+    position: fixed;
+    display: block;
+    margin-left:auto;
+    margin-right: auto;
+    padding: 15px 15px 15px 15px;
+    top: 1%;
+    left: 1%;
+    right: 1%;
+    bottom: 15%;
+    width:525px;
+    height:820px;
+    max-width: 90%;
+    max-height:95%;
+    background-color: hsl(219,60%, 9%);
+    border-radius: 3%;
+}

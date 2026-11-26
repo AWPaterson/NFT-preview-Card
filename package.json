@@ -1,0 +1,12 @@
+{
+  "name": "key-change-detector",
+  "version": "1.0.0",
+  "description": "Detect the musical key of a song over time and find key changes, entirely in the browser.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "npx --yes serve -l 5173 .",
+    "test": "node test/run-tests.js"
+  },
+  "license": "MIT"
+}

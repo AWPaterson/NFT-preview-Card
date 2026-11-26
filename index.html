@@ -1,49 +1,129 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <!-- displays site properly based on user's device -->
-
-    <link rel="icon" type="image/png" sizes="32x32" href="./images/favicon-32x32.png">
-    <link rel="stylesheet" href="style.css">
-
-    <title>Frontend Mentor | NFT preview card component</title>
-
-    <!-- Feel free to remove these styles or customise in your own stylesheet 👍 -->
-    <style>
-        .attribution {
-            font-size: 11px;
-            text-align: center;
-        }
-
-        .attribution a {
-            color: hsl(228, 45%, 44%);
-        }
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Key Change Detector</title>
+  <meta name="description" content="Upload a FLAC, WAV or MP3 file to detect its musical key and find every key change. Runs entirely in your browser.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236d5dfc'/%3E%3Cpath d='M12 23V9l11-2v14' stroke='white' stroke-width='2.4' fill='none' stroke-linejoin='round'/%3E%3Ccircle cx='9.5' cy='23' r='3' fill='white'/%3E%3Ccircle cx='20.5' cy='21' r='3' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-<div class="shadow1">
-    <div class="shadow2">
-        <div class="card">
-            <img id="preview" src="res/image-equilibrium.jpg">
-            <h1 id="NFTName">Equilibrium #3429</h1>
-
-            <p id="NFTDesc">Our Equilibrium collection promotes balance and calm.</p>
-            <img id="eth" src="res/icon-ethereum.svg">
-            <h2 id="price">0.041 ETH</h2>
-            <img id="clock" src="res/icon-clock.svg">
-            <h2 id="timeRemaining">3 days left</h2>
-            <hr>
-            <img id="avatar" src="res/image-avatar.png">
-            <h2 id="NFTCredit">Creation of <a id="artistLink" href=#">Jules Wyvern</a></h2>
-        </div>
+  <header class="site-header">
+    <div class="wrap">
+      <h1>Key Change Detector</h1>
+      <p class="tagline">Find the key of a song, and every place it changes.</p>
     </div>
-</div>
+  </header>
 
-<div class="attribution">
-    Challenge by <a href="https://www.frontendmentor.io?ref=challenge" target="_blank">Frontend Mentor</a>.
-    Coded by <a href="https://github.com/AWPaterson">Andrew Paterson</a>.
-</div>
+  <main class="wrap">
+    <section id="upload" class="card upload">
+      <label id="dropzone" class="dropzone" for="file-input">
+        <input id="file-input" type="file" accept=".flac,.wav,.mp3,audio/flac,audio/x-flac,audio/wav,audio/x-wav,audio/wave,audio/mpeg,audio/mp3">
+        <svg class="dz-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0-4 4m4-4 4 4M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="dz-title">Drop an audio file here, or <u>browse</u></span>
+        <span class="dz-sub">FLAC, WAV or MP3. Your file never leaves your device.</span>
+      </label>
+
+      <details class="settings">
+        <summary>Analysis settings</summary>
+        <div class="settings-grid">
+          <label>Change sensitivity
+            <select id="opt-sensitivity">
+              <option value="low">Low: only clear, lasting modulations</option>
+              <option value="medium" selected>Medium</option>
+              <option value="high">High: catch brief or subtle changes</option>
+            </select>
+          </label>
+          <label>Shortest section
+            <select id="opt-min">
+              <option value="6">6 seconds</option>
+              <option value="12" selected>12 seconds</option>
+              <option value="20">20 seconds</option>
+              <option value="30">30 seconds</option>
+            </select>
+          </label>
+          <label>Key profile
+            <select id="opt-profile">
+              <option value="combined" selected>Combined (recommended)</option>
+              <option value="krumhansl">Krumhansl-Kessler (classical)</option>
+              <option value="temperley">Temperley (pop/rock)</option>
+            </select>
+          </label>
+        </div>
+        <button id="reanalyze" class="btn secondary" type="button" disabled>Re-analyze with these settings</button>
+      </details>
+    </section>
+
+    <section id="status" class="card status" hidden>
+      <div class="status-row">
+        <span id="status-text">Working…</span>
+        <span id="status-pct"></span>
+      </div>
+      <div class="progress"><div id="progress-bar"></div></div>
+    </section>
+
+    <section id="error" class="card error" role="alert" hidden></section>
+
+    <section id="results" hidden>
+      <div class="card summary">
+        <div class="summary-file">
+          <span id="file-name" class="file-name"></span>
+          <span id="file-meta" class="file-meta"></span>
+        </div>
+        <div id="summary-body" class="summary-body"></div>
+      </div>
+
+      <div class="card timeline-card">
+        <div class="card-head">
+          <h2>Timeline</h2>
+          <span class="hint">Click anywhere to play from that point</span>
+        </div>
+        <div id="timeline" class="timeline">
+          <canvas id="wave"></canvas>
+          <div id="hover-tip" class="hover-tip" hidden></div>
+        </div>
+        <div class="raw-strip-wrap">
+          <canvas id="raw-strip"></canvas>
+          <span class="raw-label">Second-by-second estimate</span>
+        </div>
+        <div id="axis" class="axis"></div>
+        <audio id="player" controls preload="auto"></audio>
+        <div id="legend" class="legend"></div>
+      </div>
+
+      <div class="card" id="changes-card">
+        <div class="card-head"><h2>Key changes</h2></div>
+        <ol id="changes" class="changes"></ol>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Sections</h2>
+          <div class="exports">
+            <button id="export-csv" class="btn ghost" type="button">Export CSV</button>
+            <button id="export-json" class="btn ghost" type="button">Export JSON</button>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="sections">
+            <thead>
+              <tr><th>#</th><th>Time</th><th>Key</th><th>Camelot</th><th>Confidence</th><th>Runner-up</th><th></th></tr>
+            </thead>
+            <tbody id="sections"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <p class="footnote">
+        Key detection compares the song's pitch content with major and minor key profiles,
+        so expect occasional mix-ups between closely related keys (for example C major and
+        A minor). Change points are accurate to within a few seconds.
+        <span id="tuning-note"></span>
+      </p>
+    </section>
+  </main>
+
+  <script type="module" src="src/app.js"></script>
 </body>
 </html>

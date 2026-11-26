@@ -2,7 +2,7 @@
 // background with results cached in IndexedDB.
 
 import { db } from './db.js';
-import { readMetadata } from './metadata.js';
+import { readMetadata, META_VERSION } from './metadata.js';
 import { analyzeFile } from './analysis.js';
 import { ANALYZER_VERSION, DEFAULT_OPTIONS } from './analyzer.js';
 
@@ -15,11 +15,28 @@ export function optionsKey(options) {
   return `v${ANALYZER_VERSION}|${o.profile}|${o.sensitivity}|${o.minSectionSec}|${o.noKey}`;
 }
 
-async function* walkHandle(dir, prefix = '') {
-  for await (const [name, handle] of dir.entries()) {
-    if (name.startsWith('.')) continue;
-    if (handle.kind === 'directory') yield* walkHandle(handle, `${prefix}${name}/`);
-    else if (AUDIO_EXT.test(name)) yield { path: prefix + name, handle };
+// Folders that never hold music but do show up on drives (and some can't be read at all).
+const SKIP_DIRS = /^(\$RECYCLE\.BIN|System Volume Information|RECYCLER|#recycle|@eaDir|lost\+found)$/i;
+
+/** True for files and folders the scan should ignore (hidden, macOS "._" files, system folders). */
+export function isIgnoredName(name, isDir = false) {
+  return name.startsWith('.') || (isDir && SKIP_DIRS.test(name));
+}
+
+// Walks every subfolder (e.g. a Rekordbox drive's Contents/Artist/Album/…) and yields audio
+// files with their path relative to the chosen folder, so the whole tree becomes one flat list.
+async function* walkHandle(dir, prefix = '', onSkip) {
+  let entries;
+  try {
+    entries = dir.entries();
+    for await (const [name, handle] of entries) {
+      if (isIgnoredName(name, handle.kind === 'directory')) continue;
+      if (handle.kind === 'directory') yield* walkHandle(handle, `${prefix}${name}/`, onSkip);
+      else if (AUDIO_EXT.test(name)) yield { path: prefix + name, handle };
+    }
+  } catch (err) {
+    // A protected or vanished folder must not stop the whole scan.
+    onSkip?.(prefix || dir.name, err);
   }
 }
 
@@ -88,10 +105,12 @@ export class Library extends EventTarget {
     const found = [];
     this.scanning = true;
     this.emit('scan', { found: 0 });
-    for await (const entry of walkHandle(handle)) {
+    const skipped = [];
+    for await (const entry of walkHandle(handle, '', (path) => skipped.push(path))) {
       found.push(entry);
       if (found.length % 50 === 0) this.emit('scan', { found: found.length });
     }
+    if (skipped.length) console.warn('Folders that could not be read:', skipped);
     await this.addEntries(found.map((e) => ({ path: e.path, getFile: () => e.handle.getFile() })));
   }
 
@@ -99,7 +118,11 @@ export class Library extends EventTarget {
   async loadFromFileList(files) {
     this.clear();
     this.rootHandle = null;
-    const list = [...files].filter((f) => AUDIO_EXT.test(f.name));
+    const list = [...files].filter((f) => {
+      if (!AUDIO_EXT.test(f.name)) return false;
+      const parts = (f.webkitRelativePath || f.name).split('/');
+      return !parts.some((part, i) => isIgnoredName(part, i < parts.length - 1));
+    });
     const first = files[0]?.webkitRelativePath || '';
     this.rootName = first.split('/')[0] || 'Music';
     this.scanning = true;
@@ -121,7 +144,7 @@ export class Library extends EventTarget {
         const file = await entry.getFile();
         const sig = `${entry.path}|${file.size}|${file.lastModified}`;
         const cached = await db.get('tracks', sig);
-        const meta = cached?.meta || (await readMetadata(file));
+        const meta = cached?.meta?.v === META_VERSION ? cached.meta : await readMetadata(file, entry.path);
         const track = {
           path: entry.path,
           name: entry.path.split('/').pop(),
@@ -136,7 +159,7 @@ export class Library extends EventTarget {
           status: cached?.analysis ? (cached.optionsKey === key ? 'done' : 'stale') : 'pending',
           loose: !!entry.loose,
         };
-        if (!cached) db.put('tracks', { meta }, sig);
+        if (!cached || cached.meta !== meta) db.put('tracks', { ...(cached || {}), meta }, sig);
         const existing = this.byPath.get(track.path);
         if (existing) Object.assign(existing, track);
         else {

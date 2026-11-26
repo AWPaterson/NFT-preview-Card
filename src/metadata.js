@@ -203,7 +203,24 @@ export function guessFromFilename(name) {
   return { title: noNum };
 }
 
-export async function readMetadata(file) {
+// Bump when tag reading changes so cached metadata is re-read.
+export const META_VERSION = 2;
+
+const UNKNOWN = /^unknown[ _-]?(artist|album)$/i;
+
+/**
+ * Artist and album from a Rekordbox-style layout: …/Contents/<Artist>/<Album>/<file>.
+ * Only used when a file has no tags. Other layouts are too varied to guess from.
+ */
+export function guessFromPath(path) {
+  const folders = (path || '').split('/').slice(0, -1);
+  const idx = folders.map((f) => f.toLowerCase()).lastIndexOf('contents');
+  if (idx < 0) return {};
+  const clean = (n) => (n && !UNKNOWN.test(n) ? n : '');
+  return { artist: clean(folders[idx + 1]), album: clean(folders[idx + 2]) };
+}
+
+export async function readMetadata(file, path = file.name) {
   const ext = (file.name.match(/\.([^.]+)$/) || [])[1]?.toLowerCase();
   let meta = {};
   try {
@@ -214,10 +231,12 @@ export async function readMetadata(file) {
     console.warn('Could not read tags from', file.name, err);
   }
   const guess = guessFromFilename(file.name);
+  const fromPath = guessFromPath(path);
   return {
+    v: META_VERSION,
     title: meta.title || guess.title,
-    artist: meta.artist || guess.artist || '',
-    album: meta.album || '',
+    artist: meta.artist || fromPath.artist || guess.artist || '',
+    album: meta.album || fromPath.album || '',
     genre: meta.genre || '',
     tagKey: meta.tagKey || '',
     bpm: meta.bpm ? Math.round(parseFloat(meta.bpm)) || '' : '',

@@ -1,5 +1,5 @@
 // Detailed analysis of one track: key journey, timeline, key changes, no-key sections.
-import { el, formatTime, keyChip, keyColor, keyTextColor, setupCanvas, cssVar, paintSections, drawStripes, download } from '../ui.js';
+import { el, formatTime, keyChip, keyColor, keyTextColor, setupCanvas, cssVar, paintSections, drawStripes, download, keyText, keyShort, describeCertainty, certaintyBadge, candidateBars } from '../ui.js';
 
 export function mountTrackView(root, ctx, { path }) {
   const { library, player } = ctx;
@@ -102,10 +102,10 @@ export function mountTrackView(root, ctx, { path }) {
     if (!keyed.length) {
       text = a.silent ? 'This file is silent.' : 'No key was detected anywhere in this track. It is atonal, percussive or unpitched throughout.';
     } else if (a.changes.length === 0) {
-      text = `The track stays in ${keyed[0].name}. No key changes were detected.`;
+      text = `The track stays in ${keyText(keyed[0])}. No key changes were detected.`;
     } else {
       const n = a.changes.length;
-      text = `${n} key change${n === 1 ? '' : 's'}. Starts in ${a.startKey.name} and ends in ${a.endKey.name}. Most of the track is in ${a.overall.name}.`;
+      text = `${n} key change${n === 1 ? '' : 's'}. Starts in ${keyText(a.startKey)} and ends in ${keyText(a.endKey)}. Most of the track is in ${keyText(a.overall)}.`;
     }
     if (noKey.length) text += ` ${noKey.length} section${noKey.length === 1 ? ' has' : 's have'} no key (${formatTime(noKeyTime)} in total).`;
     body.append(el('p', { class: 'summary-text' }, text));
@@ -114,14 +114,20 @@ export function mountTrackView(root, ctx, { path }) {
     if (tagKey) body.append(el('p', { class: 'summary-text small' }, `Key stored in the file's tags: ${tagKey}`));
 
     if (a.startKey) {
-      body.append(
+      // Confidence for the keys a DJ cares about: where the track starts and ends.
+      const sameEnds = a.startKey.key === a.endKey.key && keyed.length === 1;
+      const conf = el('div', { class: 'confidence-grid' });
+      const block = (label, info) =>
         el(
           'div',
-          { class: 'mix-points' },
-          el('span', {}, 'Mix in: ', keyChip(a.startKey)),
-          el('span', {}, 'Mix out: ', keyChip(a.endKey)),
-        ),
-      );
+          { class: `conf-block cert-${info.certainty || 'none'}` },
+          el('div', { class: 'conf-head' }, el('span', { class: 'muted small' }, label), certaintyBadge(info, { withAlternatives: false })),
+          el('div', { class: 'conf-text' }, describeCertainty(info)),
+          info.certainty ? candidateBars(info) : null,
+        );
+      conf.append(block(sameEnds ? 'Key' : 'Mix in (start)', a.startKey));
+      if (!sameEnds) conf.append(block('Mix out (end)', a.endKey));
+      body.append(conf);
     }
     return el('div', { class: 'card summary' }, body);
   }
@@ -142,7 +148,7 @@ export function mountTrackView(root, ctx, { path }) {
       hoverTip.hidden = false;
       const rect = timelineEl.getBoundingClientRect();
       hoverTip.style.left = `${Math.max(8, Math.min(92, ((e.clientX - rect.left) / rect.width) * 100))}%`;
-      hoverTip.textContent = s ? `${formatTime(t)} · ${s.name}` : formatTime(t);
+      hoverTip.textContent = s ? `${formatTime(t)} · ${keyText(s)}${s.certainty === 'uncertain' ? ' (unsure)' : ''}` : formatTime(t);
     });
     timelineEl.addEventListener('mouseleave', () => {
       hoverTip.hidden = true;
@@ -224,7 +230,7 @@ export function mountTrackView(root, ctx, { path }) {
     }
     if (!items.length) {
       const k = a.sections[0];
-      list.append(el('li', { class: 'none' }, k && k.key != null ? `No key changes and no keyless sections. The track is in ${k.name} throughout.` : 'Nothing to show.'));
+      list.append(el('li', { class: 'none' }, k && k.key != null ? `No key changes and no keyless sections. The track is in ${keyText(k)} throughout.` : 'Nothing to show.'));
     }
     return el('div', { class: 'card' }, el('div', { class: 'card-head' }, el('h3', {}, 'Key changes & no-key sections')), list);
   }
@@ -232,7 +238,6 @@ export function mountTrackView(root, ctx, { path }) {
   function sectionsCard(a) {
     const tbody = el('tbody');
     a.sections.forEach((s, i) => {
-      const pct = Math.round(s.confidence * 100);
       tbody.append(
         el(
           'tr',
@@ -240,9 +245,12 @@ export function mountTrackView(root, ctx, { path }) {
           el('td', {}, i + 1),
           el('td', {}, `${formatTime(s.start)} – ${formatTime(s.end)}`),
           el('td', {}, keyChip(s)),
-          el('td', {}, s.camelot),
-          el('td', {}, s.key == null ? el('span', { class: 'muted' }, '–') : el('span', { class: 'conf' }, el('span', { class: 'conf-bar' }, el('div', { style: `width:${pct}%` })), `${pct}%`)),
-          el('td', { class: 'muted' }, s.alternatives?.[0]?.name || '–'),
+          el('td', {}, s.key == null || !s.certainty ? el('span', { class: 'muted' }, '–') : el('span', { class: 'conf', title: describeCertainty(s) }, certaintyBadge(s, { withAlternatives: false }), `${Math.round(s.confidence * 100)}%`)),
+          el(
+            'td',
+            { class: 'muted' },
+            s.alternatives?.filter((x) => x.probability == null || x.probability >= 0.02).map((x) => `${keyText(x)}${x.probability != null ? ` ${Math.round(x.probability * 100)}%` : ''}`).join(', ') || '–',
+          ),
           el('td', {}, el('button', { class: 'icon-btn', type: 'button', 'aria-label': `Play section ${i + 1}`, onclick: () => ctx.playTrack(track, { startAt: s.start }) }, '▶')),
         ),
       );
@@ -259,7 +267,7 @@ export function mountTrackView(root, ctx, { path }) {
       el(
         'div',
         { class: 'table-scroll' },
-        el('table', { class: 'sections' }, el('thead', {}, el('tr', {}, ['#', 'Time', 'Key', 'Camelot', 'Confidence', 'Runner-up', ''].map((h) => el('th', {}, h)))), tbody),
+        el('table', { class: 'sections' }, el('thead', {}, el('tr', {}, ['#', 'Time', 'Key', 'Confidence', 'Could also be', ''].map((h) => el('th', {}, h)))), tbody),
       ),
     );
   }
@@ -269,9 +277,9 @@ export function mountTrackView(root, ctx, { path }) {
   }
 
   function exportCsv(a) {
-    const rows = [['section', 'start_sec', 'end_sec', 'start', 'end', 'key', 'camelot', 'type', 'confidence', 'runner_up']];
+    const rows = [['section', 'start_sec', 'end_sec', 'start', 'end', 'key', 'camelot', 'type', 'certainty', 'confidence', 'alternatives']];
     a.sections.forEach((s, i) =>
-      rows.push([i + 1, s.start.toFixed(1), s.end.toFixed(1), formatTime(s.start), formatTime(s.end), s.name, s.camelot, s.kind, s.key == null ? '' : s.confidence.toFixed(2), s.alternatives?.[0]?.name ?? '']),
+      rows.push([i + 1, s.start.toFixed(1), s.end.toFixed(1), formatTime(s.start), formatTime(s.end), s.name, s.camelot, s.kind, s.certainty || '', s.key == null ? '' : s.confidence.toFixed(2), (s.alternatives || []).map((x) => `${x.name} (${x.camelot}) ${Math.round((x.probability || 0) * 100)}%`).join('; ')]),
     );
     const csv = rows.map((r) => r.map((v) => (/[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v)).join(',')).join('\n');
     download(`${baseName()}.csv`, 'text/csv', csv);
@@ -308,7 +316,8 @@ export function mountTrackView(root, ctx, { path }) {
       g.fillStyle = keyTextColor(s.key);
       g.font = '600 12px system-ui, sans-serif';
       g.textBaseline = 'middle';
-      const label = s.key == null ? s.name : x1 - x0 > 90 ? `${s.name} · ${s.camelot}` : s.short;
+      const q = s.certainty === 'uncertain' ? ' ?' : '';
+      const label = s.key == null ? s.name : x1 - x0 > 110 ? `${keyText(s)}${q}` : `${keyShort(s)}${q}`;
       g.fillText(label, x0 + 6, 11);
       g.restore();
     }

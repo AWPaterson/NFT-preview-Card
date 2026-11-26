@@ -36,6 +36,71 @@ export function keyTextColor(key) {
   return key == null || isMinor(key) ? '#ffffff' : '#14141c';
 }
 
+// ---------- key notation ----------
+// 'camelot' (6A), 'musical' (G minor) or 'both'.
+let notation = 'camelot';
+export const NOTATIONS = { camelot: 'Camelot', musical: 'Key', both: 'Both' };
+
+export function setNotation(n) {
+  notation = NOTATIONS[n] ? n : 'camelot';
+}
+
+export function getNotation() {
+  return notation;
+}
+
+/** Key as running text in the chosen notation, e.g. "6A", "G minor" or "G minor (6A)". */
+export function keyText(info) {
+  if (!info) return '…';
+  if (info.key == null) return info.kind === 'silence' ? 'Silence' : 'No key';
+  if (notation === 'camelot') return info.camelot;
+  if (notation === 'musical') return info.name;
+  return `${info.name} (${info.camelot})`;
+}
+
+/** Short label for tight spaces (canvas, compact chips). */
+export function keyShort(info) {
+  if (!info) return '…';
+  if (info.key == null) return info.kind === 'silence' ? 'Silence' : 'No key';
+  if (notation === 'camelot') return info.camelot;
+  if (notation === 'musical') return info.short;
+  return `${info.short} ${info.camelot}`;
+}
+
+/** Sort value for a key in the current notation (wheel order for Camelot, pitch order for names). */
+export function keySortValue(info) {
+  if (!info || info.key == null) return 99;
+  if (notation === 'musical') return (info.key % 12) * 2 + (info.key >= 12 ? 1 : 0);
+  const m = /^(\d+)([AB])$/.exec(info.camelot);
+  return Number(m[1]) * 2 + (m[2] === 'B' ? 1 : 0);
+}
+
+// ---------- confidence ----------
+export const CERTAINTY_LABEL = { definite: 'Definite', likely: 'Likely', uncertain: 'Unsure' };
+
+const pct = (p) => `${Math.round(p * 100)}%`;
+
+/** Plain-language confidence, e.g. "Probably 6A (72%), but it might be 11B (20%)". */
+export function describeCertainty(info) {
+  if (!info || info.key == null || !info.certainty) return info ? keyText(info) : '';
+  const alts = (info.alternatives || []).filter((a) => a.probability >= 0.05);
+  const main = `${keyText(info)} (${pct(info.confidence)})`;
+  const altText = alts.map((a) => `${keyText(a)} (${pct(a.probability)})`).join(' or ');
+  if (info.certainty === 'definite') return `Definitely ${main}`;
+  if (info.certainty === 'likely') return altText ? `Probably ${main}, but it might be ${altText}` : `Probably ${main}`;
+  return altText ? `Unsure: ${main} or ${altText}` : `Unsure: ${main}, weak tonal evidence`;
+}
+
+/** A small badge: "Definite", "Likely · or 11B", "Unsure · 6A / 11B". */
+export function certaintyBadge(info, { withAlternatives = true } = {}) {
+  if (!info || info.key == null || !info.certainty) return null;
+  const alt = (info.alternatives || []).filter((a) => a.probability >= 0.05);
+  let text = CERTAINTY_LABEL[info.certainty];
+  if (withAlternatives && info.certainty === 'likely' && alt[0]) text += ` · or ${keyShort(alt[0])}`;
+  if (withAlternatives && info.certainty === 'uncertain') text += ` · ${[info, ...alt.slice(0, 2)].map(keyShort).join(' / ')}`;
+  return el('span', { class: `cert-badge cert-${info.certainty}`, title: describeCertainty(info) }, text);
+}
+
 /** A coloured pill for a key, or a striped grey pill for "no key"/silence. */
 export function keyChip(info, { compact = false, title } = {}) {
   if (!info) return el('span', { class: 'key-chip pending' }, '…');
@@ -46,11 +111,44 @@ export function keyChip(info, { compact = false, title } = {}) {
       info.kind === 'silence' ? 'Silence' : 'No key',
     );
   }
+  const uncertain = info.certainty === 'uncertain';
+  let main;
+  let sub = null;
+  if (notation === 'camelot') main = info.camelot;
+  else if (notation === 'musical') main = compact ? info.short : info.name;
+  else {
+    main = compact ? info.short : info.name;
+    sub = info.camelot;
+  }
   return el(
     'span',
-    { class: 'key-chip', style: `background:${keyColor(info.key)};color:${keyTextColor(info.key)}`, title: title || `${info.name} (${info.camelot})` },
-    compact ? info.camelot : info.name,
-    compact ? null : el('span', { class: 'cam' }, info.camelot),
+    {
+      class: `key-chip ${uncertain ? 'uncertain' : ''}`,
+      style: `background:${keyColor(info.key)};color:${keyTextColor(info.key)}`,
+      title: title || (info.certainty ? describeCertainty(info) : `${info.name} (${info.camelot})`),
+    },
+    main,
+    sub ? el('span', { class: 'cam' }, sub) : null,
+    uncertain ? el('span', { class: 'q', 'aria-label': 'uncertain' }, '?') : null,
+  );
+}
+
+/** Candidate keys with probability bars, for the track view. */
+export function candidateBars(info) {
+  const list = [info, ...(info.alternatives || []).filter((c) => c.probability == null || c.probability >= 0.01)].filter((c) => c && c.key != null);
+  return el(
+    'div',
+    { class: 'candidates' },
+    list.map((c, i) => {
+      const p = i === 0 ? info.confidence : c.probability;
+      return el(
+        'div',
+        { class: 'cand' },
+        keyChip({ ...c, certainty: null }, { compact: true }),
+        el('span', { class: 'cand-bar' }, el('span', { style: `width:${Math.max(2, Math.round(p * 100))}%;background:${keyColor(c.key)}` })),
+        el('span', { class: 'cand-pct' }, pct(p)),
+      );
+    }),
   );
 }
 

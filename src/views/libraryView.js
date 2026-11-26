@@ -1,6 +1,7 @@
 // The library browser: searchable, sortable, virtualised track table.
-import { el, formatTime, keyChip } from '../ui.js';
-import { mixCompatibility, parseCamelot } from '../compat.js';
+import { el, formatTime, keyChip, keyText, keySortValue, certaintyBadge } from '../ui.js';
+import { mixCompatibility } from '../compat.js';
+import { camelot as camelotOf, keyName } from '../keys.js';
 
 const ROW_HEIGHT = 48;
 
@@ -8,16 +9,21 @@ const COLUMNS = [
   { id: 'play', label: '', sortable: false },
   { id: 'title', label: 'Title' },
   { id: 'artist', label: 'Artist' },
+  { id: 'album', label: 'Album' },
   { id: 'key', label: 'Key' },
+  { id: 'confidence', label: 'Confidence' },
   { id: 'changes', label: 'Key changes' },
   { id: 'duration', label: 'Time' },
   { id: 'bpm', label: 'BPM' },
   { id: 'add', label: '', sortable: false },
 ];
 
-function camelotSortValue(info) {
-  const c = info && parseCamelot(info.camelot);
-  return c ? c.num * 2 + (c.letter === 'B' ? 1 : 0) : 99;
+const CERTAINTY_RANK = { definite: 3, likely: 2, uncertain: 1 };
+
+export function trackConfidenceCell(track) {
+  const k = track.analysis?.startKey;
+  if (!k) return el('span', { class: 'muted' }, track.analysis ? '–' : '');
+  return certaintyBadge(k) || el('span', { class: 'muted' }, '–');
 }
 
 export function trackKeyCell(track) {
@@ -55,14 +61,14 @@ export function mountLibraryView(root, ctx) {
     el('option', { value: 'changes' }, 'With key changes'),
     el('option', { value: 'nokey-parts' }, 'With no-key sections'),
     el('option', { value: 'nokey' }, 'No key at all'),
+    el('option', { value: 'unsure' }, 'Unsure or likely keys'),
     el('option', { value: 'unanalyzed' }, 'Not analyzed yet'),
     el(
       'optgroup',
       { label: 'Starting key' },
-      Array.from({ length: 24 }, (_, i) => {
-        const code = `${Math.floor(i / 2) + 1}${i % 2 ? 'B' : 'A'}`;
-        return el('option', { value: `key:${code}` }, code);
-      }),
+      Array.from({ length: 24 }, (_, k) => ({ k, code: camelotOf(k) }))
+        .sort((x, y) => keySortValue({ key: x.k, camelot: x.code }) - keySortValue({ key: y.k, camelot: y.code }))
+        .map(({ k, code }) => el('option', { value: `key:${code}` }, keyText({ key: k, camelot: code, name: keyName(k) }))),
     ),
   );
   filter.value = view.filter;
@@ -121,6 +127,7 @@ export function mountLibraryView(root, ctx) {
     else if (f === 'nokey-parts') list = list.filter((t) => t.analysis?.sections.some((s) => s.key == null && s.kind === 'atonal'));
     else if (f === 'nokey') list = list.filter((t) => t.analysis && !t.analysis.startKey);
     else if (f === 'unanalyzed') list = list.filter((t) => !t.analysis);
+    else if (f === 'unsure') list = list.filter((t) => ['likely', 'uncertain'].includes(t.analysis?.startKey?.certainty) || ['likely', 'uncertain'].includes(t.analysis?.endKey?.certainty));
     else if (f.startsWith('key:')) list = list.filter((t) => t.analysis?.startKey?.camelot === f.slice(4));
 
     const match = view.matchPath && library.byPath.get(view.matchPath);
@@ -140,7 +147,9 @@ export function mountLibraryView(root, ctx) {
     const val = {
       title: (t) => t.meta.title.toLowerCase(),
       artist: (t) => (t.meta.artist || '￿').toLowerCase(),
-      key: (t) => camelotSortValue(t.analysis?.startKey),
+      album: (t) => (t.meta.album || '\uffff').toLowerCase(),
+      key: (t) => keySortValue(t.analysis?.startKey),
+      confidence: (t) => (t.analysis?.startKey ? CERTAINTY_RANK[t.analysis.startKey.certainty] || 0 : -1) * 2 + (t.analysis?.startKey?.confidence || 0),
       changes: (t) => (t.analysis ? t.analysis.changes.length : -1),
       duration: (t) => t.meta.duration || t.analysis?.duration || 0,
       bpm: (t) => Number(t.meta.bpm) || 0,
@@ -179,10 +188,12 @@ export function mountLibraryView(root, ctx) {
         'div',
         { class: 'cell c-title' },
         el('button', { class: 'link', type: 'button', dataset: { act: 'open' }, title: 'Show key analysis' }, track.meta.title),
-        el('span', { class: 'sub' }, track.meta.artist || track.folder),
+        el('span', { class: 'sub' }, [track.meta.artist, track.meta.album].filter(Boolean).join(' · ') || track.folder),
       ),
       el('div', { class: 'cell c-artist' }, track.meta.artist),
+      el('div', { class: 'cell c-album', title: track.folder }, track.meta.album),
       el('div', { class: 'cell c-key' }, trackKeyCell(track)),
+      el('div', { class: 'cell c-confidence' }, trackConfidenceCell(track)),
       el('div', { class: 'cell c-changes' }, trackChangesCell(track)),
       el('div', { class: 'cell c-duration' }, formatTime(track.meta.duration || track.analysis?.duration)),
       el('div', { class: 'cell c-bpm' }, track.meta.bpm || ''),
@@ -298,7 +309,7 @@ export function mountLibraryView(root, ctx) {
     update(reason, detail) {
       if (reason === 'track') {
         // Re-sort/filter lazily: analysis results can move rows.
-        if (view.filter || view.matchPath || ['key', 'changes'].includes(view.sort)) {
+        if (view.filter || view.matchPath || ['key', 'changes', 'confidence'].includes(view.sort)) {
           clearTimeout(pendingRecompute);
           pendingRecompute = setTimeout(() => {
             compute();

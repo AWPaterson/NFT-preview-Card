@@ -1,5 +1,5 @@
 // A DJ set: ordered tracks, harmonic transitions between them, and suggestions.
-import { el, formatTime, keyChip, download, toast } from '../ui.js';
+import { el, formatTime, keyChip, download, toast, keyText } from '../ui.js';
 import { mixCompatibility } from '../compat.js';
 import { trackChangesCell } from './libraryView.js';
 
@@ -99,6 +99,19 @@ export function mountSetView(root, ctx, { id }) {
       el('span', { class: 'arrow' }, '→'),
       keyChip(b.start || { key: null, kind: 'atonal' }, { compact: true }),
       el('span', { class: 'mix-label' }, c.label),
+      unsureNote(a.end, b.start),
+    );
+  }
+
+  // If either key is not certain, say so: the rating could change if the key is wrong.
+  function unsureNote(from, to) {
+    const unsure = [from, to].filter((k) => k && (k.certainty === 'uncertain' || k.certainty === 'likely'));
+    if (!unsure.length) return null;
+    const alts = unsure.map((k) => (k.alternatives || []).filter((x) => x.probability >= 0.05).map((x) => keyText(x))).flat();
+    return el(
+      'span',
+      { class: 'unsure-note', title: alts.length ? `Possible alternatives: ${alts.join(', ')}` : '' },
+      `· ${unsure.some((k) => k.certainty === 'uncertain') ? 'key unsure' : 'key probable'}${alts.length ? ` (maybe ${alts.slice(0, 2).join(' / ')})` : ''}`,
     );
   }
 
@@ -206,7 +219,7 @@ export function mountSetView(root, ctx, { id }) {
       'div',
       { class: 'card-head' },
       el('h3', {}, last ? 'Suggested next tracks' : 'Start your set'),
-      el('span', { class: 'hint' }, last ? (outKey ? `Starting in keys that mix with ${outKey.name} (${outKey.camelot})` : 'The last track ends with no key, so any key works') : 'Pick any track to begin'),
+      el('span', { class: 'hint' }, last ? (outKey ? `Starting in keys that mix with ${keyText(outKey)}` : 'The last track ends with no key, so any key works') : 'Pick any track to begin'),
     );
     box.append(head);
     if (!last) return box;

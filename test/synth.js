@@ -117,3 +117,20 @@ export function mix(a, b, gain = 1) {
   for (let i = 0; i < out.length && i < b.length; i++) out[i] += gain * b[i];
   return out;
 }
+
+// Two chords alternating every 2 s, given as MIDI note lists (for ambiguous-key tests).
+export function synthAlternating(chordA, chordB, seconds, rate = 44100) {
+  const out = new Float32Array(Math.ceil(seconds * rate));
+  const len = 2 * rate;
+  for (let i = 0; i < out.length; i++) {
+    const chord = Math.floor(i / len) % 2 ? chordB : chordA;
+    const t = (i % len) / rate;
+    let s = 0;
+    for (const m of chord) {
+      const f = 440 * 2 ** ((m - 69) / 12);
+      s += Math.sin(2 * Math.PI * f * t) + 0.5 * Math.sin(4 * Math.PI * f * t);
+    }
+    out[i] = 0.15 * Math.exp(-1.2 * t) * s;
+  }
+  return out;
+}

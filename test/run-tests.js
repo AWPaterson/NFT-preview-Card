@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { analyzeKeys } from '../src/analyzer.js';
 import { camelot, describeChange, keyName } from '../src/keys.js';
 import { mixCompatibility } from '../src/compat.js';
-import { guessFromFilename } from '../src/metadata.js';
-import { synthSong, synthDrums, synthNoise, concat, mix } from './synth.js';
+import { guessFromFilename, guessFromPath } from '../src/metadata.js';
+import { isIgnoredName } from '../src/library.js';
+import { synthSong, synthDrums, synthNoise, concat, mix, synthAlternating } from './synth.js';
 
 let failures = 0;
 function test(name, fn) {
@@ -52,6 +53,19 @@ test('Camelot mixing rules', () => {
 test('artist/title from file names', () => {
   assert.deepEqual(guessFromFilename('04 - Grid Unit - Drum Tool.wav'), { artist: 'Grid Unit', title: 'Drum Tool' });
   assert.deepEqual(guessFromFilename('golden.mp3'), { title: 'golden' });
+});
+
+test('Rekordbox Contents/Artist/Album layout gives artist and album', () => {
+  assert.deepEqual(guessFromPath('Contents/Nova Lane/Night Moves/01 Midnight Drive.mp3'), { artist: 'Nova Lane', album: 'Night Moves' });
+  assert.deepEqual(guessFromPath('USB/Contents/UnknownArtist/UnknownAlbum/x.mp3'), { artist: '', album: '' });
+  assert.deepEqual(guessFromPath('House/Deep/x.mp3'), {});
+});
+test('hidden, macOS ._ and system folders are skipped', () => {
+  assert.ok(isIgnoredName('._Midnight Drive.mp3'));
+  assert.ok(isIgnoredName('System Volume Information', true));
+  assert.ok(isIgnoredName('$RECYCLE.BIN', true));
+  assert.ok(!isIgnoredName('Contents', true));
+  assert.ok(!isIgnoredName('PIONEER', true));
 });
 
 console.log('analyzer');
@@ -111,6 +125,30 @@ test('silence → a single silent section, no key', () => {
   assert.equal(r.silent, true);
   assert.equal(r.overall, null);
   assert.equal(r.sections[0].kind, 'silence');
+});
+
+console.log('confidence');
+test('clear key is rated definite', () => {
+  const r = analyzeKeys(synthSong([{ key: 'C', seconds: 48 }]).samples, 44100);
+  assert.equal(r.sections[0].certainty, 'definite');
+  assert.ok(r.sections[0].confidence > 0.9);
+  assert.equal(r.startKey.certainty, 'definite');
+  assert.equal(r.sections[0].candidates[0].camelot, '8B');
+});
+
+test('C major / A minor ambiguity is rated uncertain with both keys offered', () => {
+  const r = analyzeKeys(synthAlternating([48, 52, 55, 60], [45, 57, 60, 64], 48), 44100);
+  const s = r.sections[0];
+  assert.equal(s.certainty, 'uncertain');
+  const top2 = s.candidates.slice(0, 2).map((c) => c.camelot).sort();
+  assert.deepEqual(top2, ['8A', '8B']);
+  const total = s.candidates.reduce((a, c) => a + c.probability, 0);
+  assert.ok(total <= 1.0001 && total > 0.9);
+});
+
+test('power chords (no thirds) are not rated definite', () => {
+  const r = analyzeKeys(synthAlternating([40, 47, 52], [45, 52, 57], 48), 44100);
+  assert.notEqual(r.sections[0].certainty, 'definite');
 });
 
 console.log('no-key detection');

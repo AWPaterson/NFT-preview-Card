@@ -22,7 +22,7 @@ const BLOCK_SEC = 1;
 const PROMINENCE = 3;
 
 // Bump when the analysis changes so cached library results are recomputed.
-export const ANALYZER_VERSION = 2;
+export const ANALYZER_VERSION = 3;
 
 const NO_KEY = KEY_COUNT; // index of the "no key" state
 const STATES = KEY_COUNT + 1;
@@ -391,10 +391,46 @@ function rankKeys(scores) {
   return Array.from(scores, (score, key) => ({ key, score })).sort((a, b) => b.score - a.score);
 }
 
+// Converts key correlations into probabilities. A lower temperature makes the
+// probabilities more decisive for the same gap between the top keys.
+const SOFTMAX_TEMP = 0.04;
+
+function keyProbabilities(ranked) {
+  const top = ranked[0].score;
+  let sum = 0;
+  const exps = ranked.map((r) => {
+    const e = Math.exp((r.score - top) / SOFTMAX_TEMP);
+    sum += e;
+    return e;
+  });
+  return ranked.map((r, i) => ({ ...r, probability: exps[i] / sum }));
+}
+
+/**
+ * Rates how sure we are of `key` for a stretch of audio:
+ *  - definite:  the key clearly beats every alternative and the audio is strongly tonal
+ *  - likely:    it wins, but an alternative (often the relative or a neighbouring key) is plausible
+ *  - uncertain: two or more keys are about equally plausible, or the tonal evidence is weak
+ * `agreement` is the share of seconds whose own best key matches; a key that keeps
+ * flipping second-to-second drops one level.
+ */
+export function rateKey(probabilities, key, agreement = 1) {
+  const entry = probabilities.find((p) => p.key === key) || probabilities[0];
+  const p = entry.probability;
+  const r = entry.score;
+  let level = p >= 0.8 && r >= 0.6 ? 2 : p >= 0.6 && r >= 0.45 ? 1 : 0;
+  if (agreement < 0.5 && level > 0) level--;
+  return { confidence: p, certainty: ['uncertain', 'likely', 'definite'][level] };
+}
+
 function confidenceOf(ranked) {
-  const r1 = ranked[0].score;
-  const r2 = ranked[1].score;
-  return clamp01((r1 - 0.3) / 0.5) * 0.6 + clamp01((r1 - r2) / 0.15) * 0.4;
+  return rateKey(keyProbabilities(ranked), ranked[0].key).confidence;
+}
+
+function candidatesFor(probabilities, key, count = 3) {
+  const first = probabilities.find((p) => p.key === key) || probabilities[0];
+  const rest = probabilities.filter((p) => p !== first).slice(0, count - 1);
+  return [first, ...rest].map((p) => ({ ...keyInfo(p.key), probability: p.probability, score: p.score }));
 }
 
 function refineBoundaries(segs, fine, searchRadius) {
@@ -518,15 +554,30 @@ export function analyzeKeys(samples, sampleRate, options = {}, progress) {
     const base = { start: s.start * BLOCK_SEC, end: Math.min(duration, s.end * BLOCK_SEC) };
     if (s.key === NO_KEY) {
       const kind = audibleCount < (s.end - s.start) / 2 ? 'silence' : 'atonal';
-      return { ...base, ...noKeyInfo(kind), confidence: 0, alternatives: [], pitchedShare: pitchedCount / (s.end - s.start) };
+      return { ...base, ...noKeyInfo(kind), confidence: 0, certainty: null, candidates: [], alternatives: [], pitchedShare: pitchedCount / (s.end - s.start) };
     }
-    const ranked = rankKeys(correlateKeys(sumChroma(chroma, pitched, s.start, s.end), templates));
+    const probs = keyProbabilities(rankKeys(correlateKeys(sumChroma(chroma, pitched, s.start, s.end), templates)));
+    let agree = 0;
+    let counted = 0;
+    for (let t = s.start; t < s.end; t++) {
+      if (!pitched[t]) continue;
+      counted++;
+      // Agreement over the ~7 s smoothed scores: individual chords pull 1-second
+      // estimates around, so a near-tie with the best key still counts.
+      let best = 0;
+      for (let k = 1; k < KEY_COUNT; k++) if (emissions[t][k] > emissions[t][best]) best = k;
+      if (emissions[t][s.key] >= emissions[t][best] - 0.03) agree++;
+    }
+    const agreement = counted ? agree / counted : 0;
+    const candidates = candidatesFor(probs, s.key);
     return {
       ...base,
       ...keyInfo(s.key),
       kind: 'key',
-      confidence: confidenceOf(ranked),
-      alternatives: ranked.slice(1, 3).map((r) => ({ ...keyInfo(r.key), score: r.score })),
+      ...rateKey(probs, s.key, agreement),
+      agreement,
+      candidates,
+      alternatives: candidates.slice(1),
     };
   });
 
@@ -578,13 +629,18 @@ export function analyzeKeys(samples, sampleRate, options = {}, progress) {
     silent: false,
     blockSec: BLOCK_SEC,
     overall,
-    startKey: keyed.length ? keyInfo(keyed[0].key) : null,
-    endKey: keyed.length ? keyInfo(keyed[keyed.length - 1].key) : null,
+    startKey: keyed.length ? sectionKey(keyed[0]) : null,
+    endKey: keyed.length ? sectionKey(keyed[keyed.length - 1]) : null,
     sections,
     changes,
     transitions,
     timeline,
   };
+}
+
+// A section's key with its certainty, for mix-in / mix-out display.
+function sectionKey(s) {
+  return { ...keyInfo(s.key), confidence: s.confidence, certainty: s.certainty, alternatives: s.alternatives };
 }
 
 function pick(s) {

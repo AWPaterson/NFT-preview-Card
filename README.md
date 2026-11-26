@@ -14,8 +14,24 @@ Everything runs locally in the browser. Your music is never uploaded anywhere.
 
 ## Features
 
+**Key confidence**
+- Every detected key has a probability and a rating: **Definite**, **Likely** or **Unsure**, plus the
+  keys it might be instead, e.g. *"Probably 6A (72%), but it might be 11B (20%)"*.
+- Unsure keys get a dashed outline and a "?" everywhere. The library has a Confidence column and an
+  "Unsure or likely keys" filter, and set transitions warn when a rating depends on an unsure key.
+- The track view shows the candidate keys as probability bars for the mix-in and mix-out keys, and
+  every section lists its alternatives.
+
+**Camelot or key names**: the switch at the top shows keys as Camelot codes (6A), key names
+(G minor) or both. Your choice is remembered.
+
 **Library**
-- Choose a folder or drive; every FLAC, WAV and MP3 inside it (including subfolders) is listed.
+- Choose a folder or drive; every FLAC, WAV and MP3 inside it, however deeply nested, is shown in
+  **one flat list**. That suits a Rekordbox USB drive (`Contents/<Artist>/<Album>/…`): pick the drive,
+  or its `Contents` folder, and every track appears at once. The Artist and Album columns (from tags, or
+  from the Rekordbox folder names when a file has no tags) and the search box replace folder browsing.
+- Hidden files, the `._` files macOS leaves on USB drives, and system folders such as
+  `System Volume Information` are skipped. A folder that can't be read doesn't stop the scan.
 - Title, artist, album, BPM and stored key are read from tags (ID3, FLAC Vorbis comments, WAV INFO/id3),
   with the file name as a fallback.
 - Tracks are analyzed in the background, and results are cached so the next visit is instant.
@@ -53,8 +69,16 @@ npm start              # serves on http://localhost:5173
 python3 -m http.server 5173
 ```
 
-To host it, publish the repository root with GitHub Pages (Settings → Pages → deploy from branch)
-or any static host. The folder picker needs a secure context (HTTPS or localhost).
+### GitHub Pages
+
+The app is a static site, so GitHub Pages can host it as-is (a `.nojekyll` file is included):
+
+1. On GitHub, open the repository's **Settings → Pages**.
+2. Under **Build and deployment**, set **Source** to *Deploy from a branch*.
+3. Choose the branch that holds the app and the **/ (root)** folder, then **Save**.
+4. After a minute or two it's live at `https://<user>.github.io/<repository>/`.
+
+The folder picker needs a secure context; GitHub Pages is HTTPS, so it works there.
 
 ## How the analysis works
 
@@ -70,13 +94,17 @@ or any static host. The folder picker needs a secure context (HTTPS or localhost
    **"no key"** state.
 7. **Viterbi decoding** over the 25 states, with a penalty for changing state, gives stable sections.
    A key change needs sustained evidence, not just a borrowed chord.
-8. Merges sections shorter than the minimum, re-estimates each section's key from all of its audio,
+8. Converts each section's key scores into probabilities and rates the result as definite, likely
+   or unsure. The rating considers how far the top key leads, how strongly tonal the audio is, and how
+   consistently the key holds through the section.
+9. Merges sections shorter than the minimum, re-estimates each section's key from all of its audio,
    refines boundaries, and labels no-key sections as *silence* or *atonal*.
 
 Settings (top right):
 
 | Setting | Effect |
 | --- | --- |
+| Key notation (top bar) | Camelot, key names, or both |
 | Key change sensitivity | How much evidence is needed before a key change is reported |
 | No-key detection | Off / lenient / normal / strict threshold for calling a section keyless |
 | Shortest section | Sections shorter than this are merged into a neighbour |

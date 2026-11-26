@@ -4,7 +4,7 @@ import { Library, supportsFolderHandles, AUDIO_EXT } from './library.js';
 import { SetStore } from './sets.js';
 import { Player } from './player.js';
 import { DEFAULT_OPTIONS } from './analyzer.js';
-import { el, formatTime, keyChip, setupCanvas, paintSections, cssVar, toast } from './ui.js';
+import { el, formatTime, keyChip, setupCanvas, paintSections, cssVar, toast, setNotation, getNotation } from './ui.js';
 import { mountLibraryView } from './views/libraryView.js';
 import { mountSetView } from './views/setView.js';
 import { mountTrackView } from './views/trackView.js';
@@ -103,6 +103,7 @@ function renderFolderBox() {
   if (loaded) {
     box.append(
       el('div', { class: 'folder-line', title: library.rootName }, el('span', { class: 'folder-icon', 'aria-hidden': 'true' }, '📁'), el('span', { class: 'ellipsis' }, library.rootName)),
+      el('div', { class: 'muted small folder-note' }, `${library.tracks.filter((t) => !t.loose).length} tracks from ${new Set(library.tracks.filter((t) => !t.loose).map((t) => t.folder)).size} folders, shown as one list`),
       el(
         'div',
         { class: 'row-gap' },
@@ -447,6 +448,28 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// ---------- key notation ----------
+
+function renderNotation() {
+  for (const b of document.querySelectorAll('[data-notation]')) {
+    const on = b.dataset.notation === getNotation();
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-checked', String(on));
+  }
+}
+
+for (const b of document.querySelectorAll('[data-notation]')) {
+  b.addEventListener('click', () => {
+    if (b.dataset.notation === getNotation()) return;
+    setNotation(b.dataset.notation);
+    db.put('kv', getNotation(), 'notation');
+    renderNotation();
+    $('pb-key').dataset.k = '';
+    updatePlayerBar();
+    mount(state.view);
+  });
+}
+
 // ---------- settings ----------
 
 const settingsDialog = $('settings');
@@ -518,6 +541,8 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', (
 // ---------- start ----------
 
 (async function init() {
+  setNotation((await db.get('kv', 'notation')) || 'camelot');
+  renderNotation();
   const saved = await db.get('kv', 'options');
   library.options = { ...DEFAULT_OPTIONS, ...(saved || {}) };
   state.activeSetId = (await db.get('kv', 'activeSetId')) || null;

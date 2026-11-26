@@ -4,125 +4,117 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Key Change Detector</title>
-  <meta name="description" content="Upload a FLAC, WAV or MP3 file to detect its musical key and find every key change. Runs entirely in your browser.">
+  <meta name="description" content="Browse your music library, see each track's key and key changes, find keyless sections, and build harmonically mixed DJ sets. Runs entirely in your browser.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236d5dfc'/%3E%3Cpath d='M12 23V9l11-2v14' stroke='white' stroke-width='2.4' fill='none' stroke-linejoin='round'/%3E%3Ccircle cx='9.5' cy='23' r='3' fill='white'/%3E%3Ccircle cx='20.5' cy='21' r='3' fill='white'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header class="site-header">
-    <div class="wrap">
-      <h1>Key Change Detector</h1>
-      <p class="tagline">Find the key of a song, and every place it changes.</p>
-    </div>
-  </header>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="var(--accent)"/><path d="M12 23V9l11-2v14" stroke="white" stroke-width="2.4" fill="none" stroke-linejoin="round"/><circle cx="9.5" cy="23" r="3" fill="white"/><circle cx="20.5" cy="21" r="3" fill="white"/></svg>
+        <span>Key Change Detector</span>
+      </div>
+      <div class="topbar-actions">
+        <button id="open-files-btn" class="btn ghost small" type="button" title="Analyze individual FLAC, WAV or MP3 files">Open files</button>
+        <button id="settings-btn" class="btn ghost small" type="button" aria-haspopup="dialog">Settings</button>
+      </div>
+    </header>
 
-  <main class="wrap">
-    <section id="upload" class="card upload">
-      <label id="dropzone" class="dropzone" for="file-input">
-        <input id="file-input" type="file" accept=".flac,.wav,.mp3,audio/flac,audio/x-flac,audio/wav,audio/x-wav,audio/wave,audio/mpeg,audio/mp3">
-        <svg class="dz-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0-4 4m4-4 4 4M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <span class="dz-title">Drop an audio file here, or <u>browse</u></span>
-        <span class="dz-sub">FLAC, WAV or MP3. Your file never leaves your device.</span>
+    <aside class="sidebar" aria-label="Library and sets">
+      <nav class="nav">
+        <button class="nav-item" type="button" data-nav="library">
+          <span>Library</span><span id="lib-count" class="nav-count"></span>
+        </button>
+      </nav>
+      <div id="folder-box" class="folder-box"></div>
+
+      <div class="sets-head">
+        <span>Sets</span>
+        <button id="new-set" class="icon-btn" type="button" aria-label="New set" title="New set">+</button>
+      </div>
+      <ul id="set-nav" class="set-nav"></ul>
+
+      <div id="queue-status" class="queue-status" hidden></div>
+    </aside>
+
+    <main id="view" class="view" tabindex="-1"></main>
+
+    <footer class="playerbar" aria-label="Player">
+      <div class="pb-info">
+        <div id="pb-title" class="pb-title">Nothing playing</div>
+        <div id="pb-sub" class="pb-sub"></div>
+      </div>
+      <div class="pb-controls">
+        <button id="pb-prev" class="icon-btn" type="button" aria-label="Previous">⏮</button>
+        <button id="pb-play" class="pb-play" type="button" aria-label="Play">▶</button>
+        <button id="pb-next" class="icon-btn" type="button" aria-label="Next">⏭</button>
+      </div>
+      <div class="pb-seek">
+        <span id="pb-time" class="pb-time">0:00</span>
+        <div id="pb-bar" class="pb-bar" role="slider" tabindex="0" aria-label="Seek" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
+          <canvas id="pb-canvas"></canvas>
+        </div>
+        <span id="pb-dur" class="pb-time">0:00</span>
+      </div>
+      <div class="pb-now">
+        <span class="muted small">Now</span>
+        <span id="pb-key"></span>
+      </div>
+      <label class="pb-vol">
+        <span class="visually-hidden">Volume</span>
+        <input id="pb-volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume">
       </label>
+    </footer>
+  </div>
 
-      <details class="settings">
-        <summary>Analysis settings</summary>
-        <div class="settings-grid">
-          <label>Change sensitivity
-            <select id="opt-sensitivity">
-              <option value="low">Low: only clear, lasting modulations</option>
-              <option value="medium" selected>Medium</option>
-              <option value="high">High: catch brief or subtle changes</option>
-            </select>
-          </label>
-          <label>Shortest section
-            <select id="opt-min">
-              <option value="6">6 seconds</option>
-              <option value="12" selected>12 seconds</option>
-              <option value="20">20 seconds</option>
-              <option value="30">30 seconds</option>
-            </select>
-          </label>
-          <label>Key profile
-            <select id="opt-profile">
-              <option value="combined" selected>Combined (recommended)</option>
-              <option value="krumhansl">Krumhansl-Kessler (classical)</option>
-              <option value="temperley">Temperley (pop/rock)</option>
-            </select>
-          </label>
-        </div>
-        <button id="reanalyze" class="btn secondary" type="button" disabled>Re-analyze with these settings</button>
-      </details>
-    </section>
-
-    <section id="status" class="card status" hidden>
-      <div class="status-row">
-        <span id="status-text">Working…</span>
-        <span id="status-pct"></span>
+  <dialog id="settings" class="dialog">
+    <form method="dialog">
+      <h2>Analysis settings</h2>
+      <div class="settings-grid">
+        <label>Key change sensitivity
+          <select name="sensitivity">
+            <option value="low">Low: only clear, lasting modulations</option>
+            <option value="medium">Medium</option>
+            <option value="high">High: catch brief or subtle changes</option>
+          </select>
+        </label>
+        <label>No-key detection
+          <select name="noKey">
+            <option value="off">Off: always assign a key</option>
+            <option value="lenient">Lenient: only clearly unpitched parts</option>
+            <option value="normal">Normal</option>
+            <option value="strict">Strict: weakly tonal parts count as no key</option>
+          </select>
+        </label>
+        <label>Shortest section
+          <select name="minSectionSec">
+            <option value="6">6 seconds</option>
+            <option value="12">12 seconds</option>
+            <option value="20">20 seconds</option>
+            <option value="30">30 seconds</option>
+          </select>
+        </label>
+        <label>Key profile
+          <select name="profile">
+            <option value="combined">Combined (recommended)</option>
+            <option value="krumhansl">Krumhansl-Kessler (classical)</option>
+            <option value="temperley">Temperley (pop/rock)</option>
+          </select>
+        </label>
       </div>
-      <div class="progress"><div id="progress-bar"></div></div>
-    </section>
-
-    <section id="error" class="card error" role="alert" hidden></section>
-
-    <section id="results" hidden>
-      <div class="card summary">
-        <div class="summary-file">
-          <span id="file-name" class="file-name"></span>
-          <span id="file-meta" class="file-meta"></span>
-        </div>
-        <div id="summary-body" class="summary-body"></div>
+      <p class="muted small">Changing settings re-analyzes your library in the background. Results for every setting are cached on this device.</p>
+      <div class="dialog-actions">
+        <button class="btn ghost" value="cancel" type="submit">Cancel</button>
+        <button class="btn primary" value="save" type="submit">Save</button>
       </div>
+    </form>
+  </dialog>
 
-      <div class="card timeline-card">
-        <div class="card-head">
-          <h2>Timeline</h2>
-          <span class="hint">Click anywhere to play from that point</span>
-        </div>
-        <div id="timeline" class="timeline">
-          <canvas id="wave"></canvas>
-          <div id="hover-tip" class="hover-tip" hidden></div>
-        </div>
-        <div class="raw-strip-wrap">
-          <canvas id="raw-strip"></canvas>
-          <span class="raw-label">Second-by-second estimate</span>
-        </div>
-        <div id="axis" class="axis"></div>
-        <audio id="player" controls preload="auto"></audio>
-        <div id="legend" class="legend"></div>
-      </div>
-
-      <div class="card" id="changes-card">
-        <div class="card-head"><h2>Key changes</h2></div>
-        <ol id="changes" class="changes"></ol>
-      </div>
-
-      <div class="card">
-        <div class="card-head">
-          <h2>Sections</h2>
-          <div class="exports">
-            <button id="export-csv" class="btn ghost" type="button">Export CSV</button>
-            <button id="export-json" class="btn ghost" type="button">Export JSON</button>
-          </div>
-        </div>
-        <div class="table-scroll">
-          <table class="sections">
-            <thead>
-              <tr><th>#</th><th>Time</th><th>Key</th><th>Camelot</th><th>Confidence</th><th>Runner-up</th><th></th></tr>
-            </thead>
-            <tbody id="sections"></tbody>
-          </table>
-        </div>
-      </div>
-
-      <p class="footnote">
-        Key detection compares the song's pitch content with major and minor key profiles,
-        so expect occasional mix-ups between closely related keys (for example C major and
-        A minor). Change points are accurate to within a few seconds.
-        <span id="tuning-note"></span>
-      </p>
-    </section>
-  </main>
+  <input id="open-files" type="file" multiple accept=".flac,.wav,.mp3,audio/flac,audio/x-flac,audio/wav,audio/x-wav,audio/wave,audio/mpeg" hidden>
+  <input id="folder-input" type="file" webkitdirectory multiple hidden>
+  <audio id="audio" preload="auto"></audio>
+  <div id="drop-overlay" class="drop-overlay" hidden><div>Drop FLAC, WAV or MP3 files to analyze them</div></div>
 
   <script type="module" src="src/app.js"></script>
 </body>

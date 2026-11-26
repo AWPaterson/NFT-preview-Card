@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { analyzeKeys } from '../src/analyzer.js';
 import { camelot, describeChange, keyName } from '../src/keys.js';
-import { synthSong } from './synth.js';
+import { mixCompatibility } from '../src/compat.js';
+import { guessFromFilename } from '../src/metadata.js';
+import { synthSong, synthDrums, synthNoise, concat, mix } from './synth.js';
 
 let failures = 0;
 function test(name, fn) {
@@ -33,6 +35,23 @@ test('change descriptions', () => {
   assert.equal(describeChange(0, 12).relation, 'parallel key');
   assert.equal(describeChange(0, 7).relation, 'dominant');
   assert.equal(describeChange(4, 0).movement, 'down a major third');
+});
+
+console.log('mixing');
+test('Camelot mixing rules', () => {
+  const k = (camelot) => ({ camelot });
+  assert.equal(mixCompatibility(k('8A'), k('8A')).level, 'perfect');
+  assert.equal(mixCompatibility(k('8A'), k('9A')).level, 'good');
+  assert.equal(mixCompatibility(k('12B'), k('1B')).level, 'good');
+  assert.equal(mixCompatibility(k('8A'), k('8B')).level, 'good');
+  assert.equal(mixCompatibility(k('8A'), k('10A')).level, 'boost');
+  assert.equal(mixCompatibility(k('8A'), k('9B')).level, 'boost');
+  assert.equal(mixCompatibility(k('9B'), k('2B')).level, 'clash');
+  assert.equal(mixCompatibility(null, k('2B')).level, 'free');
+});
+test('artist/title from file names', () => {
+  assert.deepEqual(guessFromFilename('04 - Grid Unit - Drum Tool.wav'), { artist: 'Grid Unit', title: 'Drum Tool' });
+  assert.deepEqual(guessFromFilename('golden.mp3'), { title: 'golden' });
 });
 
 console.log('analyzer');
@@ -87,9 +106,72 @@ test('section shorter than minimum is absorbed', () => {
   assert.equal(r.sections.length, 1, summary(r));
 });
 
-test('silence → no sections', () => {
+test('silence → a single silent section, no key', () => {
   const r = analyzeKeys(new Float32Array(44100 * 5), 44100);
   assert.equal(r.silent, true);
+  assert.equal(r.overall, null);
+  assert.equal(r.sections[0].kind, 'silence');
+});
+
+console.log('no-key detection');
+test('drum loop alone → no key', () => {
+  const r = analyzeKeys(synthDrums(40), 44100);
+  assert.equal(r.sections.length, 1, summary(r));
+  assert.equal(r.sections[0].kind, 'atonal');
+  assert.equal(r.overall, null);
+  assert.equal(r.startKey, null);
+});
+
+test('white noise → no key', () => {
+  const r = analyzeKeys(synthNoise(30), 44100);
+  assert.deepEqual(r.sections.map((s) => s.kind), ['atonal'], summary(r));
+});
+
+test('tonal music over drums keeps its key', () => {
+  const song = synthSong([{ key: 'F', seconds: 48 }]).samples;
+  const r = analyzeKeys(mix(song, synthDrums(48)), 44100);
+  assert.deepEqual(r.sections.map((s) => s.name), ['F major'], summary(r));
+});
+
+test('noisy, drum-heavy tonal music is not marked as no key', () => {
+  const song = synthSong([{ key: 'E', minor: true, seconds: 60 }], { noise: 0.12 }).samples;
+  const r = analyzeKeys(mix(song, synthDrums(60), 1.2), 44100);
+  assert.deepEqual(r.sections.map((s) => s.name), ['E minor'], summary(r));
+});
+
+test('drum intro → B♭ major → noise break → B♭ major → drum outro', () => {
+  const a = synthSong([{ key: 'Bb', seconds: 40 }]).samples;
+  const b = synthSong([{ key: 'Bb', seconds: 30 }]).samples;
+  const r = analyzeKeys(concat(synthDrums(30), mix(a, synthDrums(40), 0.7), synthNoise(20, 44100, 0.2), b, synthDrums(24)), 44100);
+  assert.deepEqual(r.sections.map((s) => s.name), ['No key', 'B♭ major', 'No key', 'B♭ major', 'No key'], summary(r));
+  assert.ok(Math.abs(r.sections[1].start - 30) <= 3, `key starts at ${r.sections[1].start}`);
+  assert.ok(Math.abs(r.sections[2].start - 70) <= 3, `break starts at ${r.sections[2].start}`);
+  assert.equal(r.changes.length, 0, 'same key either side of the break is not a key change');
+  assert.equal(r.transitions.length, 4);
+  assert.equal(r.startKey.name, 'B♭ major');
+  assert.equal(r.endKey.name, 'B♭ major');
+});
+
+test('key change across an atonal break is still reported', () => {
+  const a = synthSong([{ key: 'C', seconds: 36 }]).samples;
+  const b = synthSong([{ key: 'A', minor: true, seconds: 36 }]).samples;
+  const r = analyzeKeys(concat(a, synthDrums(20), b), 44100);
+  assert.deepEqual(r.sections.map((s) => s.name), ['C major', 'No key', 'A minor'], summary(r));
+  assert.equal(r.changes.length, 1);
+  assert.equal(r.changes[0].acrossNoKey, true);
+  assert.equal(r.endKey.name, 'A minor');
+});
+
+test('silent gap is labelled silence, not atonal', () => {
+  const a = synthSong([{ key: 'D', seconds: 30 }]).samples;
+  const r = analyzeKeys(concat(a, new Float32Array(44100 * 15), a), 44100);
+  assert.deepEqual(r.sections.map((s) => s.kind), ['key', 'silence', 'key'], summary(r));
+});
+
+test('no-key detection can be turned off', () => {
+  const song = synthSong([{ key: 'G', seconds: 40 }]).samples;
+  const r = analyzeKeys(concat(synthDrums(20), song), 44100, { noKey: 'off' });
+  assert.deepEqual(r.sections.map((s) => s.name), ['G major'], summary(r));
 });
 
 test('names for all 24 keys are unique', () => {

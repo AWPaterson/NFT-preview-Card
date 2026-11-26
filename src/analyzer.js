@@ -19,13 +19,30 @@ const TARGET_RATE = 11025;
 const F_MIN = 60;
 const F_MAX = 2000;
 const BLOCK_SEC = 1;
+const PROMINENCE = 3;
+
+// Bump when the analysis changes so cached library results are recomputed.
+export const ANALYZER_VERSION = 2;
+
+const NO_KEY = KEY_COUNT; // index of the "no key" state
+const STATES = KEY_COUNT + 1;
+// Share of spectral energy in prominent peaks (see extractPeaks): below TONALITY_MIN a
+// block counts as unpitched, above TONALITY_FULL as fully pitched.
+const TONALITY_MIN = 0.015;
+const TONALITY_FULL = 0.05;
+const SILENCE_SCORE = 1;
+// Entering or leaving a no-key section costs this fraction of the key-change penalty.
+const NO_KEY_PENALTY_FACTOR = 0.5;
 
 export const SENSITIVITY_PENALTY = { low: 9, medium: 5, high: 2.5 };
+// Score of the "no key" state: a section needs key evidence above this to get a key.
+export const NO_KEY_LEVEL = { off: -Infinity, lenient: 0.3, normal: 0.4, strict: 0.5 };
 
 export const DEFAULT_OPTIONS = {
   profile: 'combined',
   sensitivity: 'medium',
   minSectionSec: 12,
+  noKey: 'normal',
 };
 
 function clamp01(x) {
@@ -91,6 +108,8 @@ function extractPeaks(data, rate, progress) {
   const re = new Float64Array(N);
   const im = new Float64Array(N);
   const mag = new Float64Array(kMax + 2);
+  const prefix = new Float64Array(kMax + 3);
+  const LOCAL = 16; // bins either side used for the local spectral mean
   const frames = [];
 
   for (let f = 0; f < frameCount; f++) {
@@ -110,12 +129,24 @@ function extractPeaks(data, rate, progress) {
       if (mag[k] > frameMax) frameMax = mag[k];
     }
 
+    prefix[kMin - 1] = 0;
+    for (let k = kMin - 1; k <= kMax + 1; k++) prefix[k + 1] = prefix[k] + mag[k];
+    const total = prefix[kMax + 1] - prefix[kMin];
+
+    // Only peaks that stand well above the local spectral level count as pitched
+    // content; broadband noise and drums produce many small peaks that do not.
     const pitches = [];
     const mags = [];
+    let tonal = 0;
     const floor = frameMax * 0.005;
     for (let k = kMin; k <= kMax; k++) {
       const b = mag[k];
       if (b <= floor || b < mag[k - 1] || b < mag[k + 1]) continue;
+      const lo = Math.max(kMin - 1, k - LOCAL);
+      const hi = Math.min(kMax + 1, k + LOCAL);
+      const localMean = (prefix[hi + 1] - prefix[lo]) / (hi - lo + 1);
+      if (b < PROMINENCE * localMean) continue;
+      tonal += b;
       const a = Math.log(mag[k - 1] + 1e-12);
       const lb = Math.log(b + 1e-12);
       const c = Math.log(mag[k + 1] + 1e-12);
@@ -129,6 +160,7 @@ function extractPeaks(data, rate, progress) {
     frames.push({
       time: (start + N / 2) / rate,
       rms: Math.sqrt(energy / N),
+      tonality: total > 0 ? tonal / total : 0,
       pitches,
       mags,
     });
@@ -157,18 +189,21 @@ function estimateTuning(frames) {
 function buildBlocks(frames, tuning, duration) {
   const blockCount = Math.max(1, Math.ceil(duration / BLOCK_SEC));
   const chroma = Array.from({ length: blockCount }, () => new Float64Array(12));
-  const energy = new Float64Array(blockCount);
+  const tonality = new Float64Array(blockCount);
+  const loudFrames = new Float64Array(blockCount);
   const counts = new Float64Array(blockCount);
 
   let maxRms = 0;
   for (const fr of frames) if (fr.rms > maxRms) maxRms = fr.rms;
-  const silence = maxRms * 0.01; // -40 dB below the loudest frame
+  // -40 dB below the loudest frame, and never below about -80 dBFS.
+  const silence = Math.max(maxRms * 0.01, 1e-4);
 
   for (const fr of frames) {
     const b = Math.min(blockCount - 1, Math.floor(fr.time / BLOCK_SEC));
     counts[b]++;
     if (fr.rms < silence) continue;
-    energy[b] += fr.rms;
+    loudFrames[b]++;
+    tonality[b] += fr.tonality;
     for (let i = 0; i < fr.pitches.length; i++) {
       const m = fr.pitches[i] - tuning;
       const n = Math.round(m);
@@ -177,17 +212,20 @@ function buildBlocks(frames, tuning, duration) {
     }
   }
 
-  const active = new Uint8Array(blockCount);
+  // audible: the block has sound. pitched: it also has usable pitched content.
+  const audible = new Uint8Array(blockCount);
+  const pitched = new Uint8Array(blockCount);
   for (let b = 0; b < blockCount; b++) {
-    if (counts[b] > 0) energy[b] /= counts[b];
+    audible[b] = counts[b] > 0 && loudFrames[b] / counts[b] >= 0.5 ? 1 : 0;
+    if (loudFrames[b] > 0) tonality[b] /= loudFrames[b];
     let total = 0;
     for (let i = 0; i < 12; i++) total += chroma[b][i];
-    if (total > 0 && energy[b] > 0) {
+    if (total > 0 && audible[b]) {
       for (let i = 0; i < 12; i++) chroma[b][i] /= total;
-      active[b] = 1;
+      pitched[b] = 1;
     }
   }
-  return { chroma, active, energy };
+  return { chroma, tonality, audible, pitched };
 }
 
 function smoothChroma(chroma, active, radius) {
@@ -205,32 +243,77 @@ function smoothChroma(chroma, active, radius) {
   return out;
 }
 
-function viterbi(emissions, penalty) {
-  const T = emissions.length;
-  const score = new Float64Array(KEY_COUNT);
-  const back = Array.from({ length: T }, () => new Uint8Array(KEY_COUNT));
-  for (let k = 0; k < KEY_COUNT; k++) score[k] = emissions[0][k];
+function smoothSeries(values, radius) {
+  const out = new Float64Array(values.length);
+  for (let b = 0; b < values.length; b++) {
+    let acc = 0;
+    let wsum = 0;
+    for (let d = -radius; d <= radius; d++) {
+      const j = b + d;
+      if (j < 0 || j >= values.length) continue;
+      const w = radius + 1 - Math.abs(d);
+      acc += values[j] * w;
+      wsum += w;
+    }
+    out[b] = acc / wsum;
+  }
+  return out;
+}
 
-  const next = new Float64Array(KEY_COUNT);
+// Emission scores for the 24 keys plus the "no key" state (index NO_KEY).
+// Key scores are profile correlations, scaled down when little of the sound is pitched.
+function buildEmissions(smoothed, tonality, audible, pitched, templates, noKeyLevel) {
+  return smoothed.map((c, t) => {
+    const e = new Float64Array(STATES);
+    if (!audible[t]) {
+      e[NO_KEY] = SILENCE_SCORE;
+      return e;
+    }
+    e[NO_KEY] = noKeyLevel;
+    if (!pitched[t]) return e;
+    const weight = clamp01((tonality[t] - TONALITY_MIN) / (TONALITY_FULL - TONALITY_MIN));
+    const corr = correlateKeys(c, templates);
+    for (let k = 0; k < KEY_COUNT; k++) e[k] = corr[k] * weight;
+    return e;
+  });
+}
+
+function viterbi(emissions, penalty, noKeyPenalty) {
+  const T = emissions.length;
+  const score = new Float64Array(STATES);
+  const back = Array.from({ length: T }, () => new Uint8Array(STATES));
+  for (let k = 0; k < STATES; k++) score[k] = emissions[0][k];
+
+  const next = new Float64Array(STATES);
   for (let t = 1; t < T; t++) {
-    let best = 0;
-    for (let k = 1; k < KEY_COUNT; k++) if (score[k] > score[best]) best = k;
-    const switchScore = score[best] - penalty;
-    for (let k = 0; k < KEY_COUNT; k++) {
-      if (score[k] >= switchScore) {
-        next[k] = score[k];
-        back[t][k] = k;
+    let bestKey = 0;
+    for (let k = 1; k < KEY_COUNT; k++) if (score[k] > score[bestKey]) bestKey = k;
+    for (let k = 0; k < STATES; k++) {
+      let s = score[k];
+      let from = k;
+      if (k === NO_KEY) {
+        if (score[bestKey] - noKeyPenalty > s) {
+          s = score[bestKey] - noKeyPenalty;
+          from = bestKey;
+        }
       } else {
-        next[k] = switchScore;
-        back[t][k] = best;
+        if (score[bestKey] - penalty > s) {
+          s = score[bestKey] - penalty;
+          from = bestKey;
+        }
+        if (score[NO_KEY] - noKeyPenalty > s) {
+          s = score[NO_KEY] - noKeyPenalty;
+          from = NO_KEY;
+        }
       }
-      next[k] += emissions[t][k];
+      next[k] = s + emissions[t][k];
+      back[t][k] = from;
     }
     score.set(next);
   }
 
   let k = 0;
-  for (let j = 1; j < KEY_COUNT; j++) if (score[j] > score[k]) k = j;
+  for (let j = 1; j < STATES; j++) if (score[j] > score[k]) k = j;
   const path = new Uint8Array(T);
   for (let t = T - 1; t >= 0; t--) {
     path[t] = k;
@@ -336,15 +419,43 @@ function refineBoundaries(segs, fine, searchRadius) {
   }
 }
 
-function keyInfo(key) {
+export function keyInfo(key) {
   return { key, name: keyName(key), short: shortKeyName(key), camelot: camelot(key) };
 }
 
+export function noKeyInfo(kind) {
+  return {
+    key: null,
+    kind,
+    name: kind === 'silence' ? 'Silence' : 'No key',
+    short: kind === 'silence' ? 'Silence' : 'No key',
+    camelot: '—',
+  };
+}
+
+function emptyResult(duration, kind) {
+  const section = { start: 0, end: duration, ...noKeyInfo(kind), confidence: 0, alternatives: [], pitchedShare: 0 };
+  return {
+    version: ANALYZER_VERSION,
+    duration,
+    tuningCents: 0,
+    silent: kind === 'silence',
+    blockSec: BLOCK_SEC,
+    overall: null,
+    startKey: null,
+    endKey: null,
+    sections: duration > 0 ? [section] : [],
+    changes: [],
+    transitions: [],
+    timeline: [],
+  };
+}
+
 /**
- * Detects the key of an audio signal over time.
+ * Detects the key of an audio signal over time, including sections with no key.
  * @param {Float32Array} samples mono PCM samples
  * @param {number} sampleRate
- * @param {object} [options] { profile, sensitivity: 'low'|'medium'|'high', minSectionSec }
+ * @param {object} [options] { profile, sensitivity, minSectionSec, noKey: 'off'|'lenient'|'normal'|'strict' }
  * @param {(fraction:number, message:string)=>void} [progress]
  */
 export function analyzeKeys(samples, sampleRate, options = {}, progress) {
@@ -360,31 +471,29 @@ export function analyzeKeys(samples, sampleRate, options = {}, progress) {
   const tuning = estimateTuning(frames);
 
   report(0.78, 'Building chromagram…');
-  const { chroma, active } = buildBlocks(frames, tuning, duration);
+  const { chroma, tonality, audible, pitched } = buildBlocks(frames, tuning, duration);
   const blockCount = chroma.length;
   const templates = buildTemplates(opts.profile);
 
-  if (!active.some((a) => a)) {
-    return { duration, tuningCents: 0, silent: true, sections: [], changes: [], timeline: [], blockSec: BLOCK_SEC, overall: null };
-  }
+  if (!audible.some((a) => a)) return emptyResult(duration, 'silence');
 
   report(0.84, 'Scoring keys…');
-  const smooth = smoothChroma(chroma, active, 3);
-  const fine = smoothChroma(chroma, active, 1);
-  const emissions = smooth.map((c, t) => (active[t] ? correlateKeys(c, templates) : new Float64Array(KEY_COUNT)));
-  const fineEm = fine.map((c, t) => (active[t] ? correlateKeys(c, templates) : new Float64Array(KEY_COUNT)));
+  const noKeyLevel = NO_KEY_LEVEL[opts.noKey] ?? NO_KEY_LEVEL.normal;
+  const emissions = buildEmissions(smoothChroma(chroma, pitched, 3), smoothSeries(tonality, 3), audible, pitched, templates, noKeyLevel);
+  const fineEm = buildEmissions(smoothChroma(chroma, pitched, 1), smoothSeries(tonality, 1), audible, pitched, templates, noKeyLevel);
 
   report(0.9, 'Finding key changes…');
   const penalty = SENSITIVITY_PENALTY[opts.sensitivity] ?? SENSITIVITY_PENALTY.medium;
   const minBlocks = Math.max(1, Math.round(opts.minSectionSec / BLOCK_SEC));
-  let segs = pathToSegments(viterbi(emissions, penalty));
+  let segs = pathToSegments(viterbi(emissions, penalty, penalty * NO_KEY_PENALTY_FACTOR));
   segs = mergeShort(segs, emissions, minBlocks);
 
-  // Re-estimate each section's key from all of its audio until stable.
+  // Re-estimate each keyed section's key from all of its audio until stable.
   for (let iter = 0; iter < 5; iter++) {
     let changed = false;
     for (const s of segs) {
-      const ranked = rankKeys(correlateKeys(sumChroma(chroma, active, s.start, s.end), templates));
+      if (s.key === NO_KEY) continue;
+      const ranked = rankKeys(correlateKeys(sumChroma(chroma, pitched, s.start, s.end), templates));
       if (ranked[0].score > 0 && ranked[0].key !== s.key) {
         s.key = ranked[0].key;
         changed = true;
@@ -396,59 +505,88 @@ export function analyzeKeys(samples, sampleRate, options = {}, progress) {
   }
 
   refineBoundaries(segs, fineEm, 8);
-
-  // Leading/trailing silence belongs to the neighbouring section.
   segs[0].start = 0;
   segs[segs.length - 1].end = blockCount;
 
   const sections = segs.map((s) => {
-    const ranked = rankKeys(correlateKeys(sumChroma(chroma, active, s.start, s.end), templates));
+    let audibleCount = 0;
+    let pitchedCount = 0;
+    for (let t = s.start; t < s.end; t++) {
+      audibleCount += audible[t];
+      pitchedCount += pitched[t];
+    }
+    const base = { start: s.start * BLOCK_SEC, end: Math.min(duration, s.end * BLOCK_SEC) };
+    if (s.key === NO_KEY) {
+      const kind = audibleCount < (s.end - s.start) / 2 ? 'silence' : 'atonal';
+      return { ...base, ...noKeyInfo(kind), confidence: 0, alternatives: [], pitchedShare: pitchedCount / (s.end - s.start) };
+    }
+    const ranked = rankKeys(correlateKeys(sumChroma(chroma, pitched, s.start, s.end), templates));
     return {
-      start: s.start * BLOCK_SEC,
-      end: Math.min(duration, s.end * BLOCK_SEC),
+      ...base,
       ...keyInfo(s.key),
+      kind: 'key',
       confidence: confidenceOf(ranked),
       alternatives: ranked.slice(1, 3).map((r) => ({ ...keyInfo(r.key), score: r.score })),
     };
   });
 
+  // Every boundary between sections, and the subset that are real key changes
+  // (consecutive keyed sections with different keys, possibly across a no-key gap).
+  const transitions = [];
   const changes = [];
-  for (let i = 1; i < sections.length; i++) {
-    const from = sections[i - 1];
-    const to = sections[i];
-    changes.push({
-      time: to.start,
-      from: keyInfo(from.key),
-      to: keyInfo(to.key),
-      ...describeChange(from.key, to.key),
-    });
+  let lastKeyed = null;
+  sections.forEach((s, i) => {
+    if (i > 0) {
+      const prev = sections[i - 1];
+      transitions.push({ time: s.start, from: pick(prev), to: pick(s) });
+    }
+    if (s.key == null) return;
+    if (lastKeyed && lastKeyed.key !== s.key) {
+      changes.push({
+        time: s.start,
+        from: keyInfo(lastKeyed.key),
+        to: keyInfo(s.key),
+        acrossNoKey: sections[i - 1].key == null,
+        ...describeChange(lastKeyed.key, s.key),
+      });
+    }
+    lastKeyed = s;
+  });
+
+  const keyed = sections.filter((s) => s.key != null);
+  let overall = null;
+  if (keyed.length) {
+    const globalRanked = rankKeys(correlateKeys(sumChroma(chroma, pitched, 0, blockCount), templates));
+    const timeByKey = new Map();
+    for (const s of keyed) timeByKey.set(s.key, (timeByKey.get(s.key) || 0) + (s.end - s.start));
+    const dominantKey = [...timeByKey.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    overall = { ...keyInfo(dominantKey), wholeSong: { ...keyInfo(globalRanked[0].key), confidence: confidenceOf(globalRanked) } };
   }
 
-  // Overall key: whole-song estimate, plus the key that occupies the most time.
-  const globalRanked = rankKeys(correlateKeys(sumChroma(chroma, active, 0, blockCount), templates));
-  const timeByKey = new Map();
-  for (const s of sections) timeByKey.set(s.key, (timeByKey.get(s.key) || 0) + (s.end - s.start));
-  const dominantKey = [...timeByKey.entries()].sort((a, b) => b[1] - a[1])[0][0];
-
   const timeline = fineEm.map((e, t) => {
-    if (!active[t]) return { time: t * BLOCK_SEC, key: null, score: 0 };
     let k = 0;
-    for (let j = 1; j < KEY_COUNT; j++) if (e[j] > e[k]) k = j;
+    for (let j = 1; j < STATES; j++) if (e[j] > e[k]) k = j;
+    if (k === NO_KEY) return { time: t * BLOCK_SEC, key: null, score: 0, silent: !audible[t] };
     return { time: t * BLOCK_SEC, key: k, score: e[k] };
   });
 
   report(1, 'Done');
   return {
+    version: ANALYZER_VERSION,
     duration,
     tuningCents: Math.round(tuning * 100),
     silent: false,
     blockSec: BLOCK_SEC,
-    overall: {
-      ...keyInfo(dominantKey),
-      wholeSong: { ...keyInfo(globalRanked[0].key), confidence: confidenceOf(globalRanked) },
-    },
+    overall,
+    startKey: keyed.length ? keyInfo(keyed[0].key) : null,
+    endKey: keyed.length ? keyInfo(keyed[keyed.length - 1].key) : null,
     sections,
     changes,
+    transitions,
     timeline,
   };
+}
+
+function pick(s) {
+  return { key: s.key, kind: s.kind, name: s.name, short: s.short, camelot: s.camelot };
 }

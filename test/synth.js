@@ -72,3 +72,48 @@ export function synthSong(sections, options = {}) {
   }
   return { samples: out, rate };
 }
+
+function rng(seed) {
+  return () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff) * 2 - 1;
+}
+
+// A 124 BPM drum loop (kick, snare, hi-hat) with no pitched content.
+export function synthDrums(seconds, rate = 44100) {
+  const out = new Float32Array(Math.ceil(seconds * rate));
+  const rnd = rng(7);
+  const beat = 60 / 124;
+  for (let b = 0; b * beat < seconds; b++) {
+    const s0 = Math.floor(b * beat * rate);
+    for (let i = 0; i < 0.35 * rate && s0 + i < out.length; i++) {
+      const t = i / rate;
+      out[s0 + i] += 0.8 * Math.exp(-t * 7) * Math.sin(2 * Math.PI * (45 * t + (105 * (1 - Math.exp(-t * 25))) / 25));
+    }
+    const h0 = Math.floor((b + 0.5) * beat * rate);
+    for (let i = 0; i < 0.05 * rate && h0 + i < out.length; i++) out[h0 + i] += 0.3 * Math.exp((-i / rate) * 60) * rnd();
+    if (b % 2) for (let i = 0; i < 0.15 * rate && s0 + i < out.length; i++) out[s0 + i] += 0.4 * Math.exp((-i / rate) * 20) * rnd();
+  }
+  return out;
+}
+
+export function synthNoise(seconds, rate = 44100, amp = 0.3) {
+  const out = new Float32Array(Math.ceil(seconds * rate));
+  const rnd = rng(3);
+  for (let i = 0; i < out.length; i++) out[i] = amp * rnd();
+  return out;
+}
+
+export function concat(...parts) {
+  const out = new Float32Array(parts.reduce((a, p) => a + p.length, 0));
+  let o = 0;
+  for (const p of parts) {
+    out.set(p, o);
+    o += p.length;
+  }
+  return out;
+}
+
+export function mix(a, b, gain = 1) {
+  const out = Float32Array.from(a);
+  for (let i = 0; i < out.length && i < b.length; i++) out[i] += gain * b[i];
+  return out;
+}

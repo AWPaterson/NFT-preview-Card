@@ -1,636 +1,535 @@
-import { fifthsPosition, isMinor } from './keys.js';
+// App shell: routing between views, sidebar, player bar, settings and file/folder input.
+import { db } from './db.js';
+import { Library, supportsFolderHandles, AUDIO_EXT } from './library.js';
+import { SetStore } from './sets.js';
+import { Player } from './player.js';
+import { DEFAULT_OPTIONS } from './analyzer.js';
+import { el, formatTime, keyChip, setupCanvas, paintSections, cssVar, toast } from './ui.js';
+import { mountLibraryView } from './views/libraryView.js';
+import { mountSetView } from './views/setView.js';
+import { mountTrackView } from './views/trackView.js';
 
 const $ = (id) => document.getElementById(id);
 
-const els = {
-  dropzone: $('dropzone'),
-  input: $('file-input'),
-  reanalyze: $('reanalyze'),
-  status: $('status'),
-  statusText: $('status-text'),
-  statusPct: $('status-pct'),
-  progressBar: $('progress-bar'),
-  error: $('error'),
-  results: $('results'),
-  fileName: $('file-name'),
-  fileMeta: $('file-meta'),
-  summary: $('summary-body'),
-  timeline: $('timeline'),
-  wave: $('wave'),
-  rawStrip: $('raw-strip'),
-  hoverTip: $('hover-tip'),
-  axis: $('axis'),
-  legend: $('legend'),
-  player: $('player'),
-  changesCard: $('changes-card'),
-  changes: $('changes'),
-  sections: $('sections'),
-  tuningNote: $('tuning-note'),
-  exportCsv: $('export-csv'),
-  exportJson: $('export-json'),
-  optSensitivity: $('opt-sensitivity'),
-  optMin: $('opt-min'),
-  optProfile: $('opt-profile'),
-};
-
-const ACCEPTED = /\.(flac|wav|wave|mp3)$/i;
+const library = new Library();
+const sets = new SetStore();
+const player = new Player($('audio'));
 
 const state = {
-  file: null,
-  mono: null,
-  sampleRate: 0,
-  channels: 0,
-  peaks: null,
-  result: null,
-  objectUrl: null,
-  jobId: 0,
+  stack: [],
+  view: null,
+  mounted: null,
+  selectedPath: null,
+  activeSetId: null,
+  folderStatus: null, // 'prompt' when a saved folder needs permission again
+  scan: null,
+  libraryView: { search: '', filter: '', sort: 'path', desc: false, matchPath: null, scrollTop: 0 },
 };
 
-// ---------- helpers ----------
+const ctx = {
+  library,
+  sets,
+  player,
+  state,
+  go,
+  back,
+  rerender: () => mount(state.view),
+  playTrack,
+  openTrack: (track) => go({ type: 'track', path: track.path }),
+  addToActiveSet,
+  renderLibraryEmpty,
+};
 
-function formatTime(sec, precise = false) {
-  if (!Number.isFinite(sec)) return '0:00';
-  const m = Math.floor(sec / 60);
-  const s = precise ? (sec % 60).toFixed(1).padStart(4, '0') : String(Math.floor(sec % 60)).padStart(2, '0');
-  return `${m}:${s}`;
+// ---------- routing ----------
+
+function sameView(a, b) {
+  return a && b && a.type === b.type && a.path === b.path && a.id === b.id;
 }
 
-function keyColor(key, alpha = 1) {
-  const hue = (fifthsPosition(key) * 30 + 250) % 360;
-  return isMinor(key) ? `hsla(${hue}, 48%, 44%, ${alpha})` : `hsla(${hue}, 72%, 62%, ${alpha})`;
+function go(view, { replace = false } = {}) {
+  if (sameView(view, state.view)) return;
+  if (state.view && !replace) state.stack.push(state.view);
+  if (state.stack.length > 30) state.stack.shift();
+  mount(view);
 }
 
-function keyTextColor(key) {
-  return isMinor(key) ? '#ffffff' : '#14141c';
+function back() {
+  mount(state.stack.pop() || { type: 'library' });
 }
 
-function el(tag, attrs = {}, ...children) {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === 'class') node.className = v;
-    else if (k === 'style') node.style.cssText = v;
-    else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
-    else node.setAttribute(k, v);
+function mount(view) {
+  state.mounted?.unmount();
+  state.view = view;
+  const root = $('view');
+  root.replaceChildren();
+  root.className = `view view-${view.type}`;
+  if (view.type === 'set') {
+    state.activeSetId = view.id;
+    db.put('kv', view.id, 'activeSetId');
+    state.mounted = mountSetView(root, ctx, view);
+  } else if (view.type === 'track') {
+    state.mounted = mountTrackView(root, ctx, view);
+  } else {
+    state.mounted = mountLibraryView(root, ctx);
   }
-  for (const c of children.flat()) {
-    if (c == null || c === false) continue;
-    node.append(c instanceof Node ? c : document.createTextNode(String(c)));
-  }
-  return node;
+  root.scrollTop = 0;
+  renderSidebar();
 }
 
-function keyChip(info) {
-  return el(
-    'span',
-    { class: 'key-chip', style: `background:${keyColor(info.key)};color:${keyTextColor(info.key)}` },
-    info.name,
-    el('span', { class: 'cam' }, info.camelot),
+function notify(reason, detail) {
+  state.mounted?.update(reason, detail);
+}
+
+// ---------- sidebar ----------
+
+function renderSidebar() {
+  for (const b of document.querySelectorAll('[data-nav]')) {
+    b.classList.toggle('active', state.view?.type === b.dataset.nav);
+  }
+  $('lib-count').textContent = library.tracks.length ? library.tracks.length : '';
+  renderFolderBox();
+  renderSetNav();
+  renderQueueStatus();
+}
+
+function renderFolderBox() {
+  const box = $('folder-box');
+  box.replaceChildren();
+  if (state.scan && !state.scan.done) {
+    box.append(el('div', { class: 'folder-line' }, el('span', { class: 'spinner' }), `Scanning ${library.rootName || ''}…`), el('div', { class: 'muted small' }, `${state.scan.processed || 0} of ${state.scan.found} files`));
+    return;
+  }
+  const loaded = library.tracks.some((t) => !t.loose);
+  if (loaded) {
+    box.append(
+      el('div', { class: 'folder-line', title: library.rootName }, el('span', { class: 'folder-icon', 'aria-hidden': 'true' }, '📁'), el('span', { class: 'ellipsis' }, library.rootName)),
+      el(
+        'div',
+        { class: 'row-gap' },
+        el('button', { class: 'link small', type: 'button', onclick: pickFolder }, 'Change folder'),
+        library.rootHandle && el('button', { class: 'link small', type: 'button', onclick: rescan }, 'Rescan'),
+      ),
+    );
+  } else if (state.folderStatus === 'prompt') {
+    box.append(el('button', { class: 'btn primary block', type: 'button', onclick: reconnect }, `Reconnect “${library.rootName}”`), el('button', { class: 'link small', type: 'button', onclick: pickFolder }, 'Choose a different folder'));
+  } else {
+    box.append(el('button', { class: 'btn primary block', type: 'button', onclick: pickFolder }, 'Choose music folder'));
+  }
+}
+
+function renderSetNav() {
+  const nav = $('set-nav');
+  nav.replaceChildren();
+  if (!sets.sets.length) {
+    nav.append(el('li', { class: 'muted small set-nav-empty' }, 'No sets yet'));
+    return;
+  }
+  for (const s of sets.sets) {
+    const active = state.view?.type === 'set' && state.view.id === s.id;
+    const item = el(
+      'li',
+      {},
+      el(
+        'button',
+        { class: `nav-item set ${active ? 'active' : ''} ${state.activeSetId === s.id ? 'target' : ''}`, type: 'button', title: state.activeSetId === s.id ? 'The + button adds tracks to this set' : '' },
+        el('span', { class: 'ellipsis' }, s.name),
+        el('span', { class: 'nav-count' }, s.tracks.length),
+      ),
+    );
+    const btn = item.firstChild;
+    btn.addEventListener('click', () => go({ type: 'set', id: s.id }));
+    btn.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer.types.includes('application/x-track-path')) return;
+      e.preventDefault();
+      btn.classList.add('drop');
+    });
+    btn.addEventListener('dragleave', () => btn.classList.remove('drop'));
+    btn.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      btn.classList.remove('drop');
+      const t = library.byPath.get(e.dataTransfer.getData('application/x-track-path'));
+      if (t) {
+        await sets.addTracks(s, [t]);
+        toast(`Added “${t.meta.title}” to ${s.name}`);
+      }
+    });
+    nav.append(item);
+  }
+}
+
+function renderQueueStatus() {
+  const box = $('queue-status');
+  const st = library.stats();
+  const running = library.current || (st.pending && library.paused);
+  if (!st.total || (!st.pending && !library.current)) {
+    box.hidden = !st.total;
+    box.replaceChildren();
+    if (st.total) {
+      box.append(el('div', { class: 'small muted' }, `All ${st.done} tracks analyzed${st.errors ? ` · ${st.errors} couldn't be decoded` : ''}`));
+    }
+    return;
+  }
+  box.hidden = false;
+  const pct = st.total ? (st.done / st.total) * 100 : 0;
+  box.replaceChildren(
+    el('div', { class: 'small' }, library.paused ? 'Analysis paused' : `Analyzing ${st.done + 1} of ${st.total}`),
+    el('div', { class: 'progress' }, el('div', { class: 'bar', style: `width:${pct}%` })),
+    library.current ? el('div', { class: 'small muted ellipsis' }, library.current.meta.title) : null,
+    running || st.pending
+      ? el('button', { class: 'link small', type: 'button', onclick: () => library.pause(!library.paused) }, library.paused ? 'Resume' : 'Pause')
+      : null,
   );
 }
 
-function showError(message) {
-  els.error.textContent = message;
-  els.error.hidden = false;
-  els.status.hidden = true;
-}
+// ---------- folder & files ----------
 
-function setProgress(fraction, message) {
-  els.status.hidden = false;
-  els.statusText.textContent = message;
-  const pct = Math.round(fraction * 100);
-  els.statusPct.textContent = `${pct}%`;
-  els.progressBar.style.width = `${pct}%`;
-}
-
-function currentOptions() {
-  return {
-    sensitivity: els.optSensitivity.value,
-    minSectionSec: Number(els.optMin.value),
-    profile: els.optProfile.value,
-  };
-}
-
-// ---------- file handling ----------
-
-async function handleFile(file) {
-  if (!file) return;
-  els.error.hidden = true;
-  if (!ACCEPTED.test(file.name) && !/audio\/(flac|x-flac|wav|x-wav|wave|mpeg|mp3)/.test(file.type)) {
-    showError(`"${file.name}" isn't a supported file. Please choose a FLAC, WAV or MP3 file.`);
-    return;
-  }
-
-  state.jobId++;
-  const job = state.jobId;
-  state.file = file;
-  state.result = null;
-  els.results.hidden = true;
-  els.reanalyze.disabled = true;
-  setProgress(0, 'Reading file…');
-
-  try {
-    const buffer = await file.arrayBuffer();
-    if (job !== state.jobId) return;
-    setProgress(0.01, 'Decoding audio…');
-    const audio = await decode(buffer);
-    if (job !== state.jobId) return;
-
-    state.sampleRate = audio.sampleRate;
-    state.channels = audio.numberOfChannels;
-    state.mono = toMono(audio);
-    state.peaks = null;
-
-    if (state.objectUrl) URL.revokeObjectURL(state.objectUrl);
-    state.objectUrl = URL.createObjectURL(file);
-    els.player.src = state.objectUrl;
-
-    await runAnalysis(job);
-  } catch (err) {
-    if (job !== state.jobId) return;
-    console.error(err);
-    showError(
-      `Couldn't decode "${file.name}". The file may be damaged, or this browser may not support its format` +
-      ` (FLAC needs a recent Chrome, Edge, Firefox or Safari).`,
-    );
-  }
-}
-
-async function decode(arrayBuffer) {
-  const Ctx = window.AudioContext || window.webkitAudioContext;
-  const ctx = new Ctx();
-  try {
-    return await new Promise((resolve, reject) => {
-      const p = ctx.decodeAudioData(arrayBuffer, resolve, reject);
-      if (p && p.then) p.then(resolve, reject);
-    });
-  } finally {
-    if (ctx.close) ctx.close();
-  }
-}
-
-function toMono(audio) {
-  const n = audio.length;
-  const out = new Float32Array(n);
-  const chs = audio.numberOfChannels;
-  for (let c = 0; c < chs; c++) {
-    const data = audio.getChannelData(c);
-    for (let i = 0; i < n; i++) out[i] += data[i];
-  }
-  if (chs > 1) for (let i = 0; i < n; i++) out[i] /= chs;
-  return out;
-}
-
-// ---------- analysis ----------
-
-let worker = null;
-function getWorker() {
-  if (!worker) worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
-  return worker;
-}
-
-function analyzeInWorker(samples, sampleRate, options, onProgress) {
-  return new Promise((resolve, reject) => {
-    let w;
+async function pickFolder() {
+  if (supportsFolderHandles) {
     try {
-      w = getWorker();
+      const handle = await window.showDirectoryPicker({ id: 'music', mode: 'read', startIn: 'music' });
+      state.folderStatus = null;
+      await library.loadFromHandle(handle);
     } catch (err) {
-      reject(err);
-      return;
+      if (err.name !== 'AbortError') toast(`Couldn't open that folder: ${err.message}`);
     }
-    const id = Math.random();
-    const onMessage = (e) => {
-      if (e.data.id !== id) return;
-      if (e.data.type === 'progress') onProgress(e.data.fraction, e.data.message);
-      else {
-        w.removeEventListener('message', onMessage);
-        w.removeEventListener('error', onError);
-        if (e.data.type === 'result') resolve(e.data.result);
-        else reject(new Error(e.data.message));
-      }
-    };
-    const onError = (e) => {
-      w.removeEventListener('message', onMessage);
-      w.removeEventListener('error', onError);
-      worker = null;
-      reject(e.error || new Error(e.message || 'Worker failed'));
-    };
-    w.addEventListener('message', onMessage);
-    w.addEventListener('error', onError);
-    const copy = samples.slice();
-    w.postMessage({ id, samples: copy, sampleRate, options }, [copy.buffer]);
-  });
+  } else {
+    $('folder-input').click();
+  }
 }
 
-async function analyzeOnMainThread(samples, sampleRate, options, onProgress) {
-  const { analyzeKeys } = await import('./analyzer.js');
-  onProgress(0.05, 'Analyzing…');
-  await new Promise((r) => setTimeout(r, 30));
-  return analyzeKeys(samples, sampleRate, options);
-}
-
-async function runAnalysis(job = state.jobId) {
-  const options = currentOptions();
-  const onProgress = (f, m) => {
-    if (job === state.jobId) setProgress(f, m);
-  };
-  setProgress(0.02, 'Analyzing…');
-  let result;
+async function reconnect() {
   try {
-    result = await analyzeInWorker(state.mono, state.sampleRate, options, onProgress);
+    const status = await library.restoreHandle(true);
+    state.folderStatus = status === 'granted' ? null : status;
+    renderSidebar();
   } catch (err) {
-    console.warn('Worker analysis failed, falling back to main thread', err);
-    result = await analyzeOnMainThread(state.mono, state.sampleRate, options, onProgress);
+    toast(`Couldn't reconnect: ${err.message}`);
   }
-  if (job !== state.jobId) return;
-  state.result = result;
-  els.status.hidden = true;
-  els.reanalyze.disabled = false;
-  render();
 }
 
-// ---------- rendering ----------
-
-function render() {
-  const r = state.result;
-  const file = state.file;
-  els.results.hidden = false;
-  els.fileName.textContent = file.name;
-  els.fileMeta.textContent = [
-    formatTime(r.duration),
-    `${(state.sampleRate / 1000).toFixed(1)} kHz`,
-    state.channels === 1 ? 'mono' : state.channels === 2 ? 'stereo' : `${state.channels} channels`,
-    `${(file.size / 1048576).toFixed(1)} MB`,
-  ].join(' · ');
-
-  renderSummary(r);
-  renderChanges(r);
-  renderSections(r);
-  renderLegend(r);
-  renderAxis(r);
-  drawAll();
-
-  els.tuningNote.textContent = r.silent
-    ? ''
-    : Math.abs(r.tuningCents) < 5
-      ? 'This recording is tuned to standard A440.'
-      : `This recording is tuned ${Math.abs(r.tuningCents)} cents ${r.tuningCents > 0 ? 'sharp' : 'flat'} of A440; the analysis compensates for that.`;
+async function rescan() {
+  if (library.rootHandle) await library.loadFromHandle(library.rootHandle);
 }
 
-function renderSummary(r) {
-  els.summary.replaceChildren();
-  if (r.silent) {
-    els.summary.append(el('p', { class: 'summary-text' }, 'No musical content was found. The file appears to be silent.'));
+$('folder-input').addEventListener('change', async (e) => {
+  const files = e.target.files;
+  if (files.length) await library.loadFromFileList(files);
+  e.target.value = '';
+});
+
+async function openFiles(files) {
+  const audio = [...files].filter((f) => AUDIO_EXT.test(f.name));
+  if (!audio.length) {
+    toast('Please choose FLAC, WAV or MP3 files.');
     return;
   }
-  if (r.changes.length === 0) {
-    const s = r.sections[0];
-    els.summary.append(
-      el('div', { class: 'big-key' }, keyChip(s)),
-      el('p', { class: 'summary-text' }, `The whole song stays in ${s.name}. No key changes were detected.`),
-    );
-    return;
+  const tracks = await library.addLooseFiles(audio);
+  if (tracks[0]) {
+    library.prioritize(tracks[0]);
+    ctx.openTrack(tracks[0]);
   }
-  const journey = el('div', { class: 'journey big-key' });
-  r.sections.forEach((s, i) => {
-    if (i > 0) journey.append(el('span', { class: 'arrow' }, '→'));
-    journey.append(keyChip(s));
-  });
-  const n = r.changes.length;
-  const distinct = new Set(r.sections.map((s) => s.key)).size;
-  els.summary.append(
-    journey,
+}
+
+$('open-files-btn').addEventListener('click', () => $('open-files').click());
+$('open-files').addEventListener('change', (e) => {
+  openFiles(e.target.files);
+  e.target.value = '';
+});
+
+let dragDepth = 0;
+const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+window.addEventListener('dragenter', (e) => {
+  if (!hasFiles(e)) return;
+  dragDepth++;
+  $('drop-overlay').hidden = false;
+});
+window.addEventListener('dragleave', (e) => {
+  if (!hasFiles(e)) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) $('drop-overlay').hidden = true;
+});
+window.addEventListener('dragover', (e) => {
+  if (hasFiles(e)) e.preventDefault();
+});
+window.addEventListener('drop', (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  $('drop-overlay').hidden = true;
+  openFiles(e.dataTransfer.files);
+});
+
+function renderLibraryEmpty() {
+  const reconnecting = state.folderStatus === 'prompt';
+  return el(
+    'div',
+    { class: 'card hero' },
+    el('h2', {}, reconnecting ? `Welcome back` : 'Your music library'),
     el(
       'p',
-      { class: 'summary-text' },
-      `${n} key change${n === 1 ? '' : 's'} across ${distinct} key${distinct === 1 ? '' : 's'}. ` +
-      `Starts in ${r.sections[0].name} and ends in ${r.sections[r.sections.length - 1].name}. ` +
-      `Most of the song is in ${r.overall.name}.`,
+      { class: 'muted' },
+      reconnecting
+        ? `Your browser needs permission again to read “${library.rootName}”.`
+        : 'Choose the folder (or drive) that holds your music. Every FLAC, WAV and MP3 inside it, including subfolders, is listed and analyzed for key, key changes and keyless sections. Your files never leave this device.',
     ),
+    el(
+      'div',
+      { class: 'row-gap wrap center' },
+      reconnecting
+        ? el('button', { class: 'btn primary', type: 'button', onclick: reconnect }, `Reconnect “${library.rootName}”`)
+        : el('button', { class: 'btn primary', type: 'button', onclick: pickFolder }, 'Choose music folder'),
+      el('button', { class: 'btn ghost', type: 'button', onclick: () => $('open-files').click() }, 'Open individual files'),
+    ),
+    el('p', { class: 'muted small' }, 'You can also drag audio files anywhere onto this page.'),
+    !supportsFolderHandles
+      ? el('p', { class: 'muted small' }, 'This browser will ask for the folder each visit. Chrome and Edge on desktop can remember it. Your sets are always saved.')
+      : null,
   );
 }
 
-function playFrom(t) {
-  els.player.currentTime = Math.max(0, t);
-  els.player.play().catch(() => {});
+// ---------- sets ----------
+
+async function activeSet() {
+  let set = sets.get(state.activeSetId);
+  if (!set) {
+    set = sets.sets[sets.sets.length - 1] || (await sets.create());
+    state.activeSetId = set.id;
+    db.put('kv', set.id, 'activeSetId');
+  }
+  return set;
 }
 
-function renderChanges(r) {
-  els.changes.replaceChildren();
-  if (r.silent) {
-    els.changesCard.hidden = true;
+async function addToActiveSet(tracks) {
+  const set = await activeSet();
+  const fresh = tracks.filter((t) => !set.tracks.some((e) => e.path === t.path));
+  if (!fresh.length) {
+    toast(`Already in ${set.name}`);
     return;
   }
-  els.changesCard.hidden = false;
-  if (r.changes.length === 0) {
-    els.changes.append(el('li', {}, el('p', { class: 'no-changes' }, `No key changes. The song is in ${r.sections[0].name} throughout.`)));
-    return;
-  }
-  for (const c of r.changes) {
-    const desc = [c.movement, c.relation].filter(Boolean).join(' · ');
-    els.changes.append(
-      el(
-        'li',
-        { class: 'change' },
-        el('span', { class: 'change-time' }, formatTime(c.time)),
-        el('div', { class: 'journey' }, keyChip(c.from), el('span', { class: 'arrow' }, '→'), keyChip(c.to)),
-        el('span', { class: 'change-desc' }, desc),
-        el('button', { class: 'btn ghost', type: 'button', onclick: () => playFrom(c.time - 5) }, '▶ Hear it'),
-      ),
-    );
-  }
+  await sets.addTracks(set, fresh);
+  toast(fresh.length === 1 ? `Added “${fresh[0].meta.title}” to ${set.name}` : `Added ${fresh.length} tracks to ${set.name}`);
 }
 
-function renderSections(r) {
-  els.sections.replaceChildren();
-  r.sections.forEach((s, i) => {
-    const pct = Math.round(s.confidence * 100);
-    const alt = s.alternatives[0];
-    els.sections.append(
-      el(
-        'tr',
-        { 'data-index': i },
-        el('td', {}, i + 1),
-        el('td', {}, `${formatTime(s.start)} – ${formatTime(s.end)}`),
-        el('td', {}, keyChip(s)),
-        el('td', {}, s.camelot),
-        el('td', {}, el('span', { class: 'conf' }, el('span', { class: 'conf-bar' }, el('div', { style: `width:${pct}%` })), `${pct}%`)),
-        el('td', { class: 'runner' }, alt ? alt.name : '–'),
-        el('td', {}, el('button', { class: 'play-btn', type: 'button', 'aria-label': `Play section ${i + 1}`, onclick: () => playFrom(s.start) }, '▶')),
-      ),
-    );
+$('new-set').addEventListener('click', async () => {
+  const set = await sets.create();
+  go({ type: 'set', id: set.id });
+  requestAnimationFrame(() => {
+    const input = document.querySelector('.set-name');
+    input?.focus();
+    input?.select();
   });
-}
-
-function renderLegend(r) {
-  els.legend.replaceChildren();
-  const seen = new Set();
-  for (const s of r.sections) {
-    if (seen.has(s.key)) continue;
-    seen.add(s.key);
-    els.legend.append(keyChip(s));
-  }
-}
-
-function renderAxis(r) {
-  els.axis.replaceChildren();
-  const d = r.duration;
-  const steps = [5, 10, 15, 30, 60, 120, 300];
-  const width = els.timeline.clientWidth || 600;
-  const target = Math.max(2, Math.floor(width / 80));
-  const step = steps.find((s) => d / s <= target) || 600;
-  for (let t = 0; t <= d - step * 0.5; t += step) {
-    els.axis.append(el('span', { style: `left:${(t / d) * 100}%` }, formatTime(t)));
-  }
-  els.axis.append(el('span', { style: 'left:100%' }, formatTime(d)));
-}
-
-function computePeaks(width) {
-  const data = state.mono;
-  const per = data.length / width;
-  const mins = new Float32Array(width);
-  const maxs = new Float32Array(width);
-  let globalMax = 1e-9;
-  for (let x = 0; x < width; x++) {
-    const start = Math.floor(x * per);
-    const end = Math.min(data.length, Math.floor((x + 1) * per));
-    let lo = 0;
-    let hi = 0;
-    const stride = Math.max(1, Math.floor((end - start) / 400));
-    for (let i = start; i < end; i += stride) {
-      const v = data[i];
-      if (v < lo) lo = v;
-      if (v > hi) hi = v;
-    }
-    mins[x] = lo;
-    maxs[x] = hi;
-    globalMax = Math.max(globalMax, -lo, hi);
-  }
-  return { width, mins, maxs, globalMax };
-}
-
-function setupCanvas(canvas) {
-  const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth;
-  const h = canvas.clientHeight;
-  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
-    canvas.width = Math.round(w * dpr);
-    canvas.height = Math.round(h * dpr);
-  }
-  const ctx = canvas.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  return { ctx, w, h };
-}
-
-function cssVar(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-}
-
-function drawWave() {
-  const r = state.result;
-  if (!r || !state.mono) return;
-  const { ctx, w, h } = setupCanvas(els.wave);
-  const d = r.duration;
-  ctx.clearRect(0, 0, w, h);
-
-  // Section backgrounds
-  for (const s of r.sections) {
-    const x0 = (s.start / d) * w;
-    const x1 = (s.end / d) * w;
-    ctx.fillStyle = keyColor(s.key, 0.32);
-    ctx.fillRect(x0, 0, x1 - x0, h);
-    ctx.fillStyle = keyColor(s.key, 0.95);
-    ctx.fillRect(x0, 0, x1 - x0, 22);
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(x0, 0, x1 - x0, 22);
-    ctx.clip();
-    ctx.fillStyle = keyTextColor(s.key);
-    ctx.font = '600 12px system-ui, sans-serif';
-    ctx.textBaseline = 'middle';
-    const label = x1 - x0 > 90 ? `${s.name} · ${s.camelot}` : s.short;
-    ctx.fillText(label, x0 + 6, 11);
-    ctx.restore();
-  }
-
-  // Waveform
-  const cols = Math.max(1, Math.floor(w));
-  if (!state.peaks || state.peaks.width !== cols) state.peaks = computePeaks(cols);
-  const { mins, maxs, globalMax } = state.peaks;
-  const top = 26;
-  const mid = top + (h - top) / 2;
-  const amp = ((h - top) / 2 - 4) / globalMax;
-  ctx.fillStyle = cssVar('--wave');
-  for (let x = 0; x < cols; x++) {
-    const y0 = mid - maxs[x] * amp;
-    const y1 = mid - mins[x] * amp;
-    ctx.fillRect(x, y0, 1, Math.max(1, y1 - y0));
-  }
-
-  // Change markers
-  ctx.strokeStyle = cssVar('--playhead');
-  ctx.setLineDash([4, 3]);
-  ctx.lineWidth = 1.5;
-  for (const c of r.changes) {
-    const x = Math.round((c.time / d) * w) + 0.5;
-    ctx.beginPath();
-    ctx.moveTo(x, 22);
-    ctx.lineTo(x, h);
-    ctx.stroke();
-  }
-  ctx.setLineDash([]);
-
-  // Playhead
-  const t = els.player.currentTime || 0;
-  if (t > 0) {
-    const x = (t / d) * w;
-    ctx.fillStyle = cssVar('--playhead');
-    ctx.fillRect(x - 1, 0, 2, h);
-  }
-}
-
-function drawRawStrip() {
-  const r = state.result;
-  if (!r) return;
-  const { ctx, w, h } = setupCanvas(els.rawStrip);
-  ctx.clearRect(0, 0, w, h);
-  const d = r.duration;
-  for (const b of r.timeline) {
-    if (b.key == null) continue;
-    const x0 = (b.time / d) * w;
-    const x1 = (Math.min(d, b.time + r.blockSec) / d) * w;
-    ctx.fillStyle = keyColor(b.key, 0.35 + 0.65 * Math.max(0, Math.min(1, b.score)));
-    ctx.fillRect(x0, 0, x1 - x0 + 0.5, h);
-  }
-}
-
-function drawAll() {
-  drawWave();
-  drawRawStrip();
-}
-
-function highlightPlayingSection() {
-  const r = state.result;
-  if (!r) return;
-  const t = els.player.currentTime;
-  const idx = r.sections.findIndex((s) => t >= s.start && t < s.end);
-  for (const row of els.sections.children) row.classList.toggle('playing', Number(row.dataset.index) === idx && t > 0);
-}
-
-// ---------- interaction ----------
-
-function timeAt(clientX) {
-  const rect = els.timeline.getBoundingClientRect();
-  const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-  return { frac, time: frac * (state.result ? state.result.duration : 0), rect };
-}
-
-els.timeline.addEventListener('click', (e) => {
-  if (!state.result) return;
-  playFrom(timeAt(e.clientX).time);
 });
 
-els.timeline.addEventListener('mousemove', (e) => {
-  const r = state.result;
-  if (!r) return;
-  const { frac, time } = timeAt(e.clientX);
-  const s = r.sections.find((sec) => time >= sec.start && time < sec.end) || r.sections[r.sections.length - 1];
-  els.hoverTip.hidden = false;
-  els.hoverTip.style.left = `${Math.max(8, Math.min(92, frac * 100))}%`;
-  els.hoverTip.textContent = s ? `${formatTime(time)} · ${s.name}` : formatTime(time);
+document.querySelector('[data-nav="library"]').addEventListener('click', () => go({ type: 'library' }));
+
+// ---------- player bar ----------
+
+function playTrack(track, { queue, context, startAt = 0 } = {}) {
+  if (!track) return;
+  if (track.status === 'error') {
+    toast("This browser can't play that file.");
+    return;
+  }
+  player.play(track, { queue, context, startAt });
+}
+
+let lastPlaying = false;
+let barRaf = 0;
+
+function updatePlayerBar() {
+  const t = player.track;
+  $('pb-title').textContent = t ? t.meta.title : 'Nothing playing';
+  $('pb-sub').textContent = t ? t.meta.artist || t.folder : '';
+  $('pb-play').textContent = player.playing ? '❚❚' : '▶';
+  $('pb-play').setAttribute('aria-label', player.playing ? 'Pause' : 'Play');
+  $('pb-time').textContent = formatTime(player.currentTime);
+  $('pb-dur').textContent = formatTime(player.duration);
+  const bar = $('pb-bar');
+  bar.setAttribute('aria-valuemax', String(Math.round(player.duration)));
+  bar.setAttribute('aria-valuenow', String(Math.round(player.currentTime)));
+  bar.setAttribute('aria-valuetext', `${formatTime(player.currentTime)} of ${formatTime(player.duration)}`);
+  const sec = player.currentSection();
+  const keyBox = $('pb-key');
+  const keyId = sec ? `${sec.key}|${sec.kind}` : t ? (t.analysis ? 'none' : 'pending') : '';
+  if (keyBox.dataset.k !== keyId) {
+    keyBox.dataset.k = keyId;
+    keyBox.replaceChildren(sec ? keyChip(sec) : t ? el('span', { class: 'muted small' }, t.analysis ? '–' : 'Analyzing…') : '');
+  }
+  drawSeek();
+}
+
+function drawSeek() {
+  const canvas = $('pb-canvas');
+  const { ctx: g, w, h } = setupCanvas(canvas);
+  g.clearRect(0, 0, w, h);
+  const d = player.duration;
+  const a = player.track?.analysis;
+  const y = h / 2 - 4;
+  g.fillStyle = cssVar('--surface-2');
+  g.fillRect(0, y, w, 8);
+  if (a && d) paintSections(g, a.sections, a.duration, 0, y, w, 8, 0.85);
+  if (d) {
+    const x = (player.currentTime / d) * w;
+    g.fillStyle = 'rgba(0,0,0,0.35)';
+    g.fillRect(x, y, w - x, 8);
+    g.fillStyle = cssVar('--text');
+    g.beginPath();
+    g.arc(Math.max(6, Math.min(w - 6, x)), h / 2, 6, 0, Math.PI * 2);
+    g.fill();
+  }
+}
+
+player.addEventListener('track', () => {
+  updatePlayerBar();
+  notify('player-track');
+  const t = player.track;
+  if (t && !t.analysis) library.prioritize(t);
+  document.title = t ? `${t.meta.title} · Key Change Detector` : 'Key Change Detector';
 });
-els.timeline.addEventListener('mouseleave', () => {
-  els.hoverTip.hidden = true;
+player.addEventListener('state', () => {
+  if (player.playing !== lastPlaying) {
+    lastPlaying = player.playing;
+    notify('player-playstate');
+  }
+  if (!barRaf) {
+    barRaf = requestAnimationFrame(() => {
+      barRaf = 0;
+      updatePlayerBar();
+      notify('player');
+    });
+  }
+});
+player.addEventListener('error', () => toast("Couldn't play this file in this browser."));
+
+$('pb-play').addEventListener('click', () => player.toggle());
+$('pb-prev').addEventListener('click', () => player.prev());
+$('pb-next').addEventListener('click', () => player.next());
+$('pb-volume').addEventListener('input', (e) => {
+  player.audio.volume = Number(e.target.value);
 });
 
-let raf = 0;
-function tick() {
-  drawWave();
-  highlightPlayingSection();
-  raf = els.player.paused ? 0 : requestAnimationFrame(tick);
-}
-els.player.addEventListener('play', () => {
-  if (!raf) raf = requestAnimationFrame(tick);
+(() => {
+  const bar = $('pb-bar');
+  let dragging = false;
+  const seekTo = (e) => {
+    const r = bar.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+    player.seek(frac * player.duration);
+  };
+  bar.addEventListener('pointerdown', (e) => {
+    if (!player.track) return;
+    dragging = true;
+    bar.setPointerCapture(e.pointerId);
+    seekTo(e);
+  });
+  bar.addEventListener('pointermove', (e) => {
+    if (dragging) seekTo(e);
+  });
+  bar.addEventListener('pointerup', () => {
+    dragging = false;
+  });
+  bar.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight') player.seek(player.currentTime + 5);
+    else if (e.key === 'ArrowLeft') player.seek(player.currentTime - 5);
+    else return;
+    e.preventDefault();
+  });
+})();
+
+document.addEventListener('keydown', (e) => {
+  if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+  const tag = e.target.tagName;
+  if (['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(tag) || e.target.isContentEditable) return;
+  if (e.key === ' ') {
+    e.preventDefault();
+    player.toggle();
+  }
 });
-els.player.addEventListener('seeked', tick);
-els.player.addEventListener('timeupdate', () => {
-  if (els.player.paused) tick();
+
+// ---------- settings ----------
+
+const settingsDialog = $('settings');
+$('settings-btn').addEventListener('click', () => {
+  const form = settingsDialog.querySelector('form');
+  for (const [k, v] of Object.entries(library.options)) if (form.elements[k]) form.elements[k].value = String(v);
+  settingsDialog.showModal();
+});
+settingsDialog.addEventListener('close', async () => {
+  if (settingsDialog.returnValue !== 'save') return;
+  const form = settingsDialog.querySelector('form');
+  const options = {
+    sensitivity: form.elements.sensitivity.value,
+    noKey: form.elements.noKey.value,
+    minSectionSec: Number(form.elements.minSectionSec.value),
+    profile: form.elements.profile.value,
+  };
+  await db.put('kv', options, 'options');
+  library.setOptions(options);
+  toast('Settings saved. Re-analyzing in the background.');
+});
+
+// ---------- library events ----------
+
+let sidebarTimer = 0;
+function scheduleSidebar() {
+  if (sidebarTimer) return;
+  sidebarTimer = setTimeout(() => {
+    sidebarTimer = 0;
+    renderSidebar();
+  }, 150);
+}
+
+library.addEventListener('scan', (e) => {
+  state.scan = e.detail;
+  if (e.detail.done && !e.detail.found) toast(`No FLAC, WAV or MP3 files were found in “${library.rootName}”.`, 5000);
+  scheduleSidebar();
+});
+library.addEventListener('changed', () => {
+  notify('library');
+  scheduleSidebar();
+});
+library.addEventListener('queue', scheduleSidebar);
+library.addEventListener('track', (e) => {
+  const t = e.detail;
+  notify('track', t);
+  if (t.status === 'done' && sets.sets.some((s) => s.tracks.some((x) => x.path === t.path))) sets.refreshTrack(t);
+  if (t === player.track) updatePlayerBar();
+});
+library.addEventListener('progress', (e) => notify('progress', e.detail));
+sets.addEventListener('changed', (e) => {
+  renderSetNav();
+  notify('sets', e.detail);
 });
 
 let resizeTimer = 0;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
-    if (!state.result) return;
-    renderAxis(state.result);
-    drawAll();
-  }, 100);
+    notify('resize');
+    drawSeek();
+  }, 120);
 });
-window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', drawAll);
-
-els.input.addEventListener('change', () => {
-  handleFile(els.input.files[0]);
-  els.input.value = '';
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => {
+  notify('resize');
+  drawSeek();
 });
 
-['dragenter', 'dragover'].forEach((type) =>
-  window.addEventListener(type, (e) => {
-    e.preventDefault();
-    els.dropzone.classList.add('dragging');
-  }),
-);
-['dragleave', 'drop'].forEach((type) =>
-  window.addEventListener(type, (e) => {
-    e.preventDefault();
-    if (type === 'drop' || e.target === document.documentElement || !e.relatedTarget) els.dropzone.classList.remove('dragging');
-  }),
-);
-window.addEventListener('drop', (e) => {
-  const file = e.dataTransfer && e.dataTransfer.files[0];
-  if (file) handleFile(file);
-});
+// ---------- start ----------
 
-els.reanalyze.addEventListener('click', async () => {
-  if (!state.mono) return;
-  state.jobId++;
-  els.reanalyze.disabled = true;
-  els.error.hidden = true;
+(async function init() {
+  const saved = await db.get('kv', 'options');
+  library.options = { ...DEFAULT_OPTIONS, ...(saved || {}) };
+  state.activeSetId = (await db.get('kv', 'activeSetId')) || null;
+  await sets.load();
+  mount({ type: 'library' });
+  updatePlayerBar();
   try {
-    await runAnalysis(state.jobId);
+    state.folderStatus = await library.restoreHandle(false);
+    if (state.folderStatus === 'granted') state.folderStatus = null;
   } catch (err) {
-    showError(`Analysis failed: ${err.message}`);
-    els.reanalyze.disabled = false;
+    console.warn('Could not restore the music folder', err);
   }
-});
-
-// ---------- export ----------
-
-function download(name, type, text) {
-  const url = URL.createObjectURL(new Blob([text], { type }));
-  const a = el('a', { href: url, download: name });
-  document.body.append(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function baseName() {
-  return (state.file ? state.file.name.replace(/\.[^.]+$/, '') : 'song') + '-keys';
-}
-
-els.exportCsv.addEventListener('click', () => {
-  const r = state.result;
-  if (!r) return;
-  const rows = [['section', 'start_sec', 'end_sec', 'start', 'end', 'key', 'camelot', 'confidence', 'runner_up']];
-  r.sections.forEach((s, i) =>
-    rows.push([i + 1, s.start.toFixed(1), s.end.toFixed(1), formatTime(s.start), formatTime(s.end), s.name, s.camelot, s.confidence.toFixed(2), s.alternatives[0]?.name ?? '']),
-  );
-  const csv = rows.map((row) => row.map((v) => (/[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v)).join(',')).join('\n');
-  download(`${baseName()}.csv`, 'text/csv', csv);
-});
-
-els.exportJson.addEventListener('click', () => {
-  const r = state.result;
-  if (!r) return;
-  const { timeline, ...rest } = r;
-  download(`${baseName()}.json`, 'application/json', JSON.stringify({ file: state.file.name, ...rest }, null, 2));
-});
+  renderSidebar();
+  if (state.view.type === 'library') state.mounted.update('library');
+})();
